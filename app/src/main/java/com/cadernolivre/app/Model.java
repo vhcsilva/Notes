@@ -42,6 +42,8 @@ public final class Model {
         public int lastPage;
         /** Id da pasta onde o caderno está ("" = raiz da biblioteca). */
         public String folder = "";
+        /** "notebook" (caderno com páginas) ou "board" (quadro infinito). */
+        public String kind = "notebook";
         public final List<Page> pages = new ArrayList<>();
 
         public JSONObject toJson() throws JSONException {
@@ -53,6 +55,7 @@ public final class Model {
             o.put("updated", updated);
             o.put("lastPage", lastPage);
             o.put("folder", folder);
+            o.put("kind", kind);
             JSONArray arr = new JSONArray();
             for (Page p : pages) arr.put(p.toJson());
             o.put("pages", arr);
@@ -68,6 +71,7 @@ public final class Model {
             nb.updated = o.optLong("updated");
             nb.lastPage = o.optInt("lastPage", 0);
             nb.folder = o.optString("folder", "");
+            nb.kind = o.optString("kind", "notebook");
             JSONArray arr = o.optJSONArray("pages");
             if (arr != null) for (int i = 0; i < arr.length(); i++) nb.pages.add(Page.fromJson(arr.getJSONObject(i)));
             if (nb.pages.isEmpty()) nb.pages.add(new Page());
@@ -139,6 +143,14 @@ public final class Model {
     // ------------------------------------------------------------------ Elementos
     public abstract static class Item {
         public abstract RectF bounds();
+        /** Teste de toque genérico (usado pelo Quadro). */
+        public boolean hitTest(float x, float y, float tol) {
+            if (this instanceof StrokeItem) return ((StrokeItem) this).hit(x, y, tol);
+            if (this instanceof BoardItem) return ((BoardItem) this).hit(x, y, tol);
+            RectF b = new RectF(bounds());
+            b.inset(-tol, -tol);
+            return b.contains(x, y);
+        }
         public abstract Item translated(float dx, float dy);
         public abstract Item scaled(float s, float cx, float cy);
         public Item recolored(int color) { return this; }
@@ -154,6 +166,8 @@ public final class Model {
             } else if ("x".equals(t)) {
                 return new TextItem(o.optString("text"), (float) o.optDouble("x"), (float) o.optDouble("y"),
                         (float) o.optDouble("size", 32), o.optInt("c", 0xFF000000));
+            } else if ("b".equals(t)) {
+                return BoardItem.fromJson(o);
             } else if ("i".equals(t)) {
                 return new ImageItem(o.optString("file"), new RectF((float) o.optDouble("l"), (float) o.optDouble("tp"),
                         (float) o.optDouble("r"), (float) o.optDouble("b")));

@@ -154,7 +154,7 @@ public class MainActivity extends Activity {
         grid.setOnItemClickListener((a, v, pos, id) -> {
             Object o = shown.get(pos);
             if (o instanceof Folders.Folder) openFolder(((Folders.Folder) o).id);
-            else openNotebook(((Storage.Meta) o).id);
+            else openItem((Storage.Meta) o);
         });
         grid.setOnItemLongClickListener((a, v, pos, id) -> {
             Object o = shown.get(pos);
@@ -297,6 +297,15 @@ public class MainActivity extends Activity {
         startActivity(new Intent(this, NotebookActivity.class).putExtra(NotebookActivity.EXTRA_ID, id));
     }
 
+    private void openBoard(String id) {
+        startActivity(new Intent(this, BoardActivity.class).putExtra(NotebookActivity.EXTRA_ID, id));
+    }
+
+    private void openItem(Storage.Meta m) {
+        if ("board".equals(m.kind)) openBoard(m.id);
+        else openNotebook(m.id);
+    }
+
     private void open(String type, int req) {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -310,6 +319,7 @@ public class MainActivity extends Activity {
         new Ui.Sheet(this, "Criar")
                 .item("notebook", "Novo caderno", where, false, this::newNotebookSheet)
                 .item("note", "Nota rápida", "Uma página em branco, pronta para escrever", false, this::quickNote)
+                .item("board", "Novo quadro", "Tela infinita para diagramas, fluxos e esboços", false, this::newBoard)
                 .item("folder_plus", "Nova pasta", where, false, () -> folderDialog(null))
                 .item("import", "Importar PDF", "Para ler e anotar", false, () -> open("application/pdf", REQ_IMPORT_PDF))
                 .show();
@@ -328,6 +338,24 @@ public class MainActivity extends Activity {
             Storage.save(this, nb);
             openNotebook(nb.id);
         } catch (Exception e) { Ui.toast(this, "Erro: " + e.getMessage()); }
+    }
+
+    private void newBoard() {
+        Ui.prompt(this, "Novo quadro", "Quadro " + new SimpleDateFormat("dd/MM", Locale.getDefault()).format(new Date()), t -> {
+            Model.Notebook nb = new Model.Notebook();
+            nb.id = Storage.newId();
+            nb.title = t.isEmpty() ? "Quadro" : t;
+            nb.kind = "board";
+            nb.coverColor = 0;
+            nb.folder = currentFolder;
+            Model.Page p = new Model.Page();
+            p.template = Model.T_BLANK;
+            nb.pages.add(p);
+            try {
+                Storage.save(this, nb);
+                openBoard(nb.id);
+            } catch (Exception e) { Ui.toast(this, "Erro: " + e.getMessage()); }
+        });
     }
 
     private void newNotebookSheet() {
@@ -551,7 +579,7 @@ public class MainActivity extends Activity {
     private void notebookOptions(final Storage.Meta m) {
         String where = folders.path(folderOf(m));
         new Ui.Sheet(this, m.title)
-                .item("notebook", "Abrir", where, false, () -> openNotebook(m.id))
+                .item("board".equals(m.kind) ? "board" : "notebook", "Abrir", where, false, () -> openItem(m))
                 .item("edit", "Renomear", () -> Ui.prompt(this, "Renomear", m.title, s -> {
                     if (s.isEmpty()) return;
                     try { Storage.edit(this, m.id, nb -> nb.title = s); reload(); } catch (Exception e) { Ui.toast(this, "Erro: " + e.getMessage()); }
@@ -656,6 +684,7 @@ public class MainActivity extends Activity {
                         + "• Botão da S Pen apaga\n"
                         + "• Modo só caneta: o dedo rola a página sem riscar\n"
                         + "• Laço → botão de texto: converte escrita em texto digitado\n"
+                        + "• Quadro: toque duas vezes numa forma para escrever dentro dela; o cadeado mantém a ferramenta\n"
                         + "• Toque e segure um caderno ou pasta para mais opções")
                 .setPositiveButton("OK", null).show();
     }
@@ -798,7 +827,9 @@ public class MainActivity extends Activity {
                 Storage.Meta m = (Storage.Meta) o;
                 t1.setText(m.title);
                 String date = DateFormat.getDateInstance(DateFormat.MEDIUM).format(new Date(m.updated));
-                t2.setText(searching ? folders.path(folderOf(m)) : m.pages + (m.pages == 1 ? " pág. · " : " págs. · ") + date);
+                t2.setText(searching ? folders.path(folderOf(m))
+                        : "board".equals(m.kind) ? "Quadro · " + date
+                        : m.pages + (m.pages == 1 ? " pág. · " : " págs. · ") + date);
                 cover.setNotebook(m, m.cover == 0 ? thumb(m) : null);
             }
             return card;
@@ -848,12 +879,16 @@ public class MainActivity extends Activity {
                     Path clip = new Path();
                     clip.addRoundRect(body, r, r, Path.Direction.CW);
                     c.clipPath(clip);
-                    float s = Math.max(body.width() / thumb.getWidth(), body.height() / thumb.getHeight());
+                    boolean board = "board".equals(meta.kind);
+                    if (board) { p.setColor(BoardView.PAPER); c.drawRect(body, p); }
+                    float s = board ? Math.min(body.width() / thumb.getWidth(), body.height() / thumb.getHeight())
+                            : Math.max(body.width() / thumb.getWidth(), body.height() / thumb.getHeight());
                     float tw = thumb.getWidth() * s, th = thumb.getHeight() * s;
-                    c.drawBitmap(thumb, null, new RectF((body.width() - tw) / 2, 0, (body.width() + tw) / 2, th), p);
+                    float ty = board ? (body.height() - th) / 2 : 0;
+                    c.drawBitmap(thumb, null, new RectF((body.width() - tw) / 2, ty, (body.width() + tw) / 2, ty + th), p);
                     c.restore();
                 } else {
-                    Drawable ic = Icons.of("doc", 0xFFB0B4C0);
+                    Drawable ic = Icons.of("board".equals(meta.kind) ? "board" : "doc", 0xFFB0B4C0);
                     int is = Ui.dp(getContext(), 40);
                     ic.setBounds((int) (w - is) / 2, (int) (h - is) / 2, (int) (w + is) / 2, (int) (h + is) / 2);
                     ic.draw(c);

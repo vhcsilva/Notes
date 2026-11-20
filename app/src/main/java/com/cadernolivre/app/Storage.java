@@ -27,7 +27,7 @@ public final class Storage {
     private Storage() {}
 
     public static class Meta {
-        public String id, title, folder = "";
+        public String id, title, folder = "", kind = "notebook";
         public int cover, pages;
         public long updated;
     }
@@ -59,6 +59,7 @@ public final class Storage {
                 m.pages = o.optInt("pages");
                 m.updated = o.optLong("updated");
                 m.folder = o.optString("folder", "");
+                m.kind = o.optString("kind", "notebook");
                 out.add(m);
             } catch (Exception ignored) {
             }
@@ -81,6 +82,7 @@ public final class Storage {
         meta.put("pages", nb.pages.size());
         meta.put("updated", nb.updated);
         meta.put("folder", nb.folder);
+        meta.put("kind", nb.kind);
         return new String[]{nb.toJson().toString(), meta.toString()};
     }
 

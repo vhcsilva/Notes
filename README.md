@@ -24,6 +24,15 @@ Cada envio (`push`) para a branch `main` gera um APK novo automaticamente pelo G
 - Abrir PDFs enviados por outros apps ("Abrir com" / "Compartilhar")
 - Tema claro e escuro (segue o sistema)
 
+**Quadro (tela infinita)**
+- Retângulo, losango, elipse, seta, linha, desenho livre, texto e imagens
+- Estilo "à mão" (traço levemente irregular) ou limpo; preenchimento hachurado, cruzado ou sólido
+- Cores de traço e fundo, espessura, traço contínuo/tracejado/pontilhado, cantos retos ou arredondados
+- Selecionar, mover, redimensionar (alças), seleção por área, duplicar, trazer para frente / enviar para trás
+- Toque duas vezes numa forma para escrever dentro dela
+- Cadeado para manter a ferramenta e desenhar várias formas seguidas
+- Zoom e rolagem livres, grade de pontos, exportar/compartilhar como PNG
+
 **Escrita e desenho**
 - Rolagem contínua entre páginas, com rolagem inercial
 - Caneta com espessura variável pela pressão (S Pen, canetas ativas)
@@ -79,6 +88,8 @@ base64 -w0 release.jks   # copie a saída
 |---|---|
 | `MainActivity.java` | Biblioteca: pastas, cadernos, busca, importação e backup |
 | `Folders.java` | Pastas e subpastas |
+| `BoardActivity.java` / `BoardView.java` | Quadro infinito |
+| `BoardItem.java` / `BoardRenderer.java` | Formas do quadro e traço à mão |
 | `Recognizer.java` | Escrita à mão → texto (ML Kit) |
 | `AutoBackup.java` | Backup automático numa pasta escolhida |
 | `Ui.java` / `Icons.java` / `Th.java` | Componentes, ícones e tema claro/escuro |

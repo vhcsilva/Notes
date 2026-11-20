@@ -189,6 +189,38 @@ final class Icons {
                 case "info": c.drawCircle(12, 12, 9, p); line(c, 12, 11, 12, 16.5f); c.drawCircle(12, 7.8f, 1.1f, f); break;
                 case "edit": c.drawPath(closed(15.5f, 3.5f, 20.5f, 8.5f, 9, 20, 4, 20, 4, 15), p); break;
                 case "star": c.drawPath(closed(12, 3, 14.6f, 9, 21, 9.4f, 16, 13.6f, 17.6f, 20, 12, 16.5f, 6.4f, 20, 8, 13.6f, 3, 9.4f, 9.4f, 9), p); break;
+                case "cursor": c.drawPath(closed(6, 3, 6, 19, 10.5f, 14.5f, 13.5f, 21, 16, 20, 13, 13.5f, 19, 13.5f), p); break;
+                case "square": c.drawRoundRect(new RectF(4, 5, 20, 19), 2, 2, p); break;
+                case "diamond": c.drawPath(closed(12, 3, 21, 12, 12, 21, 3, 12), p); break;
+                case "circle": c.drawOval(new RectF(3.5f, 5, 20.5f, 19), p); break;
+                case "arrow": line(c, 4, 20, 19, 5); c.drawPath(poly(11, 5, 19, 5, 19, 13), p); break;
+                case "line": line(c, 4, 20, 20, 4); break;
+                case "lock":
+                    c.drawRoundRect(new RectF(5, 11, 19, 21), 2, 2, p);
+                    c.drawArc(new RectF(8, 4, 16, 14), 180, 180, false, p);
+                    line(c, 8, 9, 8, 11); line(c, 16, 9, 16, 11); break;
+                case "unlock":
+                    c.drawRoundRect(new RectF(5, 11, 19, 21), 2, 2, p);
+                    c.drawArc(new RectF(8, 3, 16, 13), 180, 160, false, p);
+                    line(c, 8, 8, 8, 11); break;
+                case "grid":
+                    c.drawRoundRect(new RectF(4, 4, 20, 20), 2, 2, p);
+                    line(c, 9.3f, 4, 9.3f, 20); line(c, 14.7f, 4, 14.7f, 20); line(c, 4, 9.3f, 20, 9.3f); line(c, 4, 14.7f, 20, 14.7f); break;
+                case "front":
+                    c.drawRoundRect(new RectF(4, 4, 14, 14), 1.5f, 1.5f, f);
+                    c.drawRoundRect(new RectF(10, 10, 20, 20), 1.5f, 1.5f, p); break;
+                case "backward":
+                    c.drawRoundRect(new RectF(4, 4, 14, 14), 1.5f, 1.5f, p);
+                    c.drawRoundRect(new RectF(10, 10, 20, 20), 1.5f, 1.5f, f); break;
+                case "board":
+                    c.drawRoundRect(new RectF(3, 4, 21, 17), 2, 2, p);
+                    line(c, 12, 17, 12, 20); line(c, 8, 21, 16, 21);
+                    c.drawRect(new RectF(6, 7.5f, 10.5f, 11.5f), p); line(c, 10.5f, 9.5f, 14, 12.5f); c.drawCircle(16, 13, 2, p); break;
+                case "selectall":
+                    Paint dd = new Paint(p);
+                    dd.setPathEffect(new DashPathEffect(new float[]{2.5f, 2.2f}, 0));
+                    c.drawRoundRect(new RectF(3.5f, 3.5f, 20.5f, 20.5f), 2, 2, dd);
+                    c.drawRoundRect(new RectF(8, 8, 16, 16), 1, 1, p); break;
                 default: c.drawCircle(12, 12, 8, p);
             }
             c.restore();
