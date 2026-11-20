@@ -30,7 +30,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig (ks != null && new File(ks).exists()) ? signingConfigs.release : signingConfigs.debug
+            signingConfig = (ks != null && new File(ks).exists()) ? signingConfigs.release : signingConfigs.debug
         }
     }
 
