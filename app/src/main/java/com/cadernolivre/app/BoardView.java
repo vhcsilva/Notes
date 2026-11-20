@@ -33,7 +33,7 @@ public class BoardView extends View {
             T_ARROW = 5, T_LINE = 6, T_PEN = 7, T_TEXT = 8, T_ERASER = 9;
 
     private static final int M_NONE = 0, M_PAN = 1, M_MULTI = 2, M_CREATE = 3, M_PEN = 4, M_MARQUEE = 5,
-            M_MOVE = 6, M_RESIZE = 7, M_ERASE = 8, M_TAP = 9;
+            M_MOVE = 6, M_RESIZE = 7, M_ERASE = 8, M_TAP = 9, M_ROTATE = 10;
     private static final int SPEN_DOWN = 211, SPEN_UP = 212, SPEN_MOVE = 213;
     public static final int PAPER = 0xFFFCFCFD;
 
@@ -71,6 +71,9 @@ public class BoardView extends View {
     private List<Model.Item> snapshot;
     private float eraserX = Float.NaN, eraserY;
     private long lastTapTime;
+    /** Forma destacada como alvo ao prender uma seta. */
+    private BoardItem bindHint;
+    private String createStartBind = "";
     private Model.Item lastTapItem;
 
     private final Paint grid = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -195,7 +198,18 @@ public class BoardView extends View {
             overlay.setPathEffect(null);
             c.drawRect(marquee, overlay);
         }
-        if (!selection.isEmpty() && mode != M_RESIZE || (mode == M_RESIZE && !selection.isEmpty())) drawSelection(c, s);
+        if (bindHint != null) {
+            float[] k = bindHint.corners(6 * density / s);
+            android.graphics.Path hp = new android.graphics.Path();
+            hp.moveTo(k[0], k[1]);
+            for (int i = 1; i < 4; i++) hp.lineTo(k[i * 2], k[i * 2 + 1]);
+            hp.close();
+            overlay.setColor(0x994C5FD5);
+            overlay.setStrokeWidth(3f * density / s);
+            c.drawPath(hp, overlay);
+            overlay.setStrokeWidth(1.5f / s);
+        }
+        if (!selection.isEmpty()) drawSelection(c, s);
         if (mode == M_ERASE && !Float.isNaN(eraserX)) {
             handleFill.setColor(0x22000000);
             c.drawCircle(eraserX, eraserY, 10 * density / s, handleFill);
@@ -232,14 +246,32 @@ public class BoardView extends View {
         return b;
     }
 
+    private boolean rotatable() {
+        return selection.size() == 1 && selection.get(0) instanceof BoardItem && ((BoardItem) selection.get(0)).bindable();
+    }
+
     private void drawSelection(Canvas c, float s) {
         overlay.setColor(0xFF4C5FD5);
         overlay.setStrokeWidth(1.5f / s);
         float hr = 6 * density / s;
         if (selection.size() == 1 && selection.get(0) instanceof BoardItem && ((BoardItem) selection.get(0)).isLinear()) {
             BoardItem b = (BoardItem) selection.get(0);
-            drawHandle(c, b.x1, b.y1, hr);
-            drawHandle(c, b.x2, b.y2, hr);
+            drawHandle(c, b.x1, b.y1, hr, !b.startBind.isEmpty());
+            drawHandle(c, b.x2, b.y2, hr, !b.endBind.isEmpty());
+            return;
+        }
+        float[] h = handles();
+        if (rotatable()) {
+            android.graphics.Path box = new android.graphics.Path();
+            box.moveTo(h[0], h[1]);
+            for (int i = 1; i < 4; i++) box.lineTo(h[i * 2], h[i * 2 + 1]);
+            box.close();
+            c.drawPath(box, overlay);
+            float tx = (h[0] + h[2]) / 2, ty = (h[1] + h[3]) / 2;
+            c.drawLine(tx, ty, h[8], h[9], overlay);
+            for (int i = 0; i < 4; i++) drawHandle(c, h[i * 2], h[i * 2 + 1], hr, false);
+            handleFill.setColor(0xFF4C5FD5);
+            c.drawCircle(h[8], h[9], hr * 1.1f, handleFill);
             return;
         }
         RectF r = new RectF(selectionBounds());
@@ -248,32 +280,85 @@ public class BoardView extends View {
         overlay.setPathEffect(selection.size() > 1 ? new DashPathEffect(new float[]{8 / s * density, 6 / s * density}, 0) : null);
         c.drawRect(r, overlay);
         overlay.setPathEffect(null);
-        if (selection.size() == 1) {
-            drawHandle(c, r.left, r.top, hr);
-            drawHandle(c, r.right, r.top, hr);
-            drawHandle(c, r.right, r.bottom, hr);
-            drawHandle(c, r.left, r.bottom, hr);
-        }
+        if (selection.size() == 1) for (int i = 0; i < 4; i++) drawHandle(c, h[i * 2], h[i * 2 + 1], hr, false);
     }
 
-    private void drawHandle(Canvas c, float x, float y, float r) {
-        handleFill.setColor(0xFFFFFFFF);
+    private void drawHandle(Canvas c, float x, float y, float r, boolean bound) {
+        handleFill.setColor(bound ? 0xFF4C5FD5 : 0xFFFFFFFF);
         c.drawCircle(x, y, r, handleFill);
         c.drawCircle(x, y, r, overlay);
     }
 
-    /** Posições das alças em coordenadas do quadro: {x0,y0,x1,y1,...}. */
+    /** Posições das alças em coordenadas do quadro: 4 cantos (+ rotação, índice 4) ou 2 pontas de seta. */
     private float[] handles() {
         if (selection.size() != 1) return new float[0];
         Model.Item it = selection.get(0);
-        if (it instanceof BoardItem && ((BoardItem) it).isLinear()) {
+        float pad = 6 * density / scale();
+        if (it instanceof BoardItem) {
             BoardItem b = (BoardItem) it;
-            return new float[]{b.x1, b.y1, b.x2, b.y2};
+            if (b.isLinear()) return new float[]{b.x1, b.y1, b.x2, b.y2};
+            float[] k = b.corners(pad);
+            float[] out = new float[10];
+            System.arraycopy(k, 0, out, 0, 8);
+            // alça de rotação acima do meio da borda superior
+            float mx = (k[0] + k[2]) / 2, my = (k[1] + k[3]) / 2;
+            float[] c = b.center();
+            float dx = mx - c[0], dy = my - c[1];
+            float len = (float) Math.max(0.001, Math.hypot(dx, dy));
+            float off = 26 * density / scale();
+            out[8] = mx + dx / len * off;
+            out[9] = my + dy / len * off;
+            return out;
         }
         RectF r = new RectF(it.bounds());
-        float pad = 6 * density / scale();
         r.inset(-pad, -pad);
         return new float[]{r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom};
+    }
+
+    // ================================================================ setas presas às formas
+    private BoardItem bindTargetAt(float x, float y, String excludeId) {
+        float t = 8 * density / scale();
+        for (int i = page.items.size() - 1; i >= 0; i--) {
+            Model.Item it = page.items.get(i);
+            if (it instanceof BoardItem) {
+                BoardItem b = (BoardItem) it;
+                if (b.id.equals(excludeId)) continue;
+                if (b.containsForBind(x, y, t)) return b;
+            }
+        }
+        return null;
+    }
+
+    private java.util.Map<String, BoardItem> bindables() {
+        java.util.Map<String, BoardItem> m = new java.util.HashMap<>();
+        for (Model.Item it : page.items) if (it instanceof BoardItem && ((BoardItem) it).bindable()) m.put(((BoardItem) it).id, (BoardItem) it);
+        return m;
+    }
+
+    /** Reposiciona as pontas das setas/linhas presas às formas (e solta vínculos de formas apagadas). */
+    private void updateBindings() {
+        java.util.Map<String, BoardItem> m = bindables();
+        float gap = 6;
+        for (int i = 0; i < page.items.size(); i++) {
+            Model.Item it = page.items.get(i);
+            if (!(it instanceof BoardItem)) continue;
+            BoardItem a = (BoardItem) it;
+            if (!a.isLinear() || (a.startBind.isEmpty() && a.endBind.isEmpty())) continue;
+            BoardItem s0 = m.get(a.startBind), e0 = m.get(a.endBind);
+            String sb = s0 == null ? "" : a.startBind, eb = e0 == null ? "" : a.endBind;
+            if (s0 != null && s0 == e0) { e0 = null; eb = ""; }
+            float nx1 = a.x1, ny1 = a.y1, nx2 = a.x2, ny2 = a.y2;
+            float[] refS = e0 != null ? e0.center() : new float[]{a.x2, a.y2};
+            float[] refE = s0 != null ? s0.center() : new float[]{a.x1, a.y1};
+            if (s0 != null) { float[] q = s0.boundaryToward(refS[0], refS[1], gap); nx1 = q[0]; ny1 = q[1]; }
+            if (e0 != null) { float[] q = e0.boundaryToward(refE[0], refE[1], gap); nx2 = q[0]; ny2 = q[1]; }
+            if (nx1 != a.x1 || ny1 != a.y1 || nx2 != a.x2 || ny2 != a.y2 || !sb.equals(a.startBind) || !eb.equals(a.endBind)) {
+                BoardItem n = a.withPoints(nx1, ny1, nx2, ny2).withBinds(sb, eb);
+                page.items.set(i, n);
+                int si = selection.indexOf(a);
+                if (si >= 0) selection.set(si, n);
+            }
+        }
     }
 
     // ================================================================ toque
@@ -424,10 +509,10 @@ public class BoardView extends View {
             case T_SELECT: {
                 float[] h = handles();
                 float ht = 18 * density / scale();
-                for (int i = 0; i < h.length / 2; i++) {
+                for (int i = h.length / 2 - 1; i >= 0; i--) {
                     if (Math.hypot(p[0] - h[i * 2], p[1] - h[i * 2 + 1]) <= ht) {
-                        beginTransform(M_RESIZE);
                         handle = i;
+                        beginTransform(i == 4 ? M_ROTATE : M_RESIZE);
                         return;
                     }
                 }
@@ -454,6 +539,11 @@ public class BoardView extends View {
                 int type = t == T_RECT ? BoardItem.RECT : t == T_DIAMOND ? BoardItem.DIAMOND : t == T_ELLIPSE ? BoardItem.ELLIPSE
                         : t == T_ARROW ? BoardItem.ARROW : BoardItem.LINE;
                 creating = new BoardItem(type, p[0], p[1], p[0], p[1], style.copy(), "", BoardItem.newSeed());
+                createStartBind = "";
+                if (creating.isLinear()) {
+                    BoardItem tgt = bindTargetAt(p[0], p[1], "");
+                    if (tgt != null) createStartBind = tgt.id;
+                }
                 break;
             }
             case T_PEN:
@@ -483,6 +573,18 @@ public class BoardView extends View {
         origIdx = new ArrayList<>();
         for (Model.Item it : selection) origIdx.add(page.items.indexOf(it));
         origBounds = selectionBounds();
+        if (m == M_MOVE) {
+            java.util.Set<String> ids = new java.util.HashSet<>();
+            for (Model.Item it : selection) if (it instanceof BoardItem) ids.add(((BoardItem) it).id);
+            for (int i = 0; i < origSel.size(); i++) {
+                if (!(origSel.get(i) instanceof BoardItem)) continue;
+                BoardItem a = (BoardItem) origSel.get(i);
+                if (!a.isLinear()) continue;
+                String sb = ids.contains(a.startBind) ? a.startBind : "";
+                String eb = ids.contains(a.endBind) ? a.endBind : "";
+                if (!sb.equals(a.startBind) || !eb.equals(a.endBind)) origSel.set(i, a.withBinds(sb, eb));
+            }
+        }
     }
 
     private void move(MotionEvent e) {
@@ -491,6 +593,19 @@ public class BoardView extends View {
             case M_CREATE: {
                 float x2 = p[0], y2 = p[1];
                 creating = creating.withPoints(creating.x1, creating.y1, x2, y2);
+                if (creating.isLinear()) bindHint = bindTargetAt(x2, y2, createStartBind);
+                break;
+            }
+            case M_ROTATE: {
+                moved = true;
+                BoardItem b = (BoardItem) origSel.get(0);
+                float[] c = b.center();
+                double a = Math.atan2(p[1] - c[1], p[0] - c[0]) + Math.PI / 2;
+                double deg = Math.toDegrees(a);
+                double snap = Math.round(deg / 15.0) * 15.0;
+                if (Math.abs(deg - snap) < 4) a = Math.toRadians(snap);
+                final float ang = (float) Math.IEEEremainder(a, Math.PI * 2);
+                applyTransform(it -> ((BoardItem) it).withAngle(ang));
                 break;
             }
             case M_PEN:
@@ -540,30 +655,42 @@ public class BoardView extends View {
         }
         selection.clear();
         selection.addAll(ns);
+        updateBindings();
     }
 
     private void resizeTo(float px, float py) {
         Model.Item o = origSel.get(0);
         if (o instanceof BoardItem && ((BoardItem) o).isLinear()) {
             BoardItem b = (BoardItem) o;
-            final BoardItem n = handle == 0 ? b.withPoints(px, py, b.x2, b.y2) : b.withPoints(b.x1, b.y1, px, py);
+            BoardItem n = handle == 0 ? b.withPoints(px, py, b.x2, b.y2) : b.withPoints(b.x1, b.y1, px, py);
+            // a ponta arrastada fica solta até soltar o dedo
+            n = handle == 0 ? n.withBinds("", n.endBind) : n.withBinds(n.startBind, "");
+            bindHint = bindTargetAt(px, py, handle == 0 ? b.endBind : b.startBind);
+            final BoardItem fn = n;
+            applyTransform(it -> fn);
+            return;
+        }
+        if (o instanceof BoardItem && ((BoardItem) o).isBox()) {
+            // redimensiona no referencial da forma (funciona com a forma girada); canto oposto fica parado
+            BoardItem b = (BoardItem) o;
+            RectF r = b.rect();
+            float cx = r.centerX(), cy = r.centerY();
+            float[] lp = BoardItem.rotate(px, py, cx, cy, -b.angle);
+            float[] rc = {r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom};
+            int op = (handle + 2) % 4;
+            float ox = rc[op * 2], oy = rc[op * 2 + 1];
+            float w = Math.max(4, Math.abs(lp[0] - ox)), h = Math.max(4, Math.abs(lp[1] - oy));
+            float[] nc = BoardItem.rotate((ox + lp[0]) / 2, (oy + lp[1]) / 2, cx, cy, b.angle);
+            final BoardItem n = b.withPoints(nc[0] - w / 2, nc[1] - h / 2, nc[0] + w / 2, nc[1] + h / 2);
             applyTransform(it -> n);
             return;
         }
         // canto oposto fica fixo
-        float[] corners = {origBounds.left, origBounds.top, origBounds.right, origBounds.top,
+        float[] corners = o instanceof BoardItem ? ((BoardItem) o).corners(0)
+                : new float[]{origBounds.left, origBounds.top, origBounds.right, origBounds.top,
                 origBounds.right, origBounds.bottom, origBounds.left, origBounds.bottom};
         int opp = (handle + 2) % 4;
         final float fx = corners[opp * 2], fy = corners[opp * 2 + 1];
-        if (o instanceof BoardItem && ((BoardItem) o).isBox()) {
-            BoardItem b = (BoardItem) o;
-            RectF r = b.rect();
-            float[] rc = {r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom};
-            float ox = rc[opp * 2], oy = rc[opp * 2 + 1];
-            final BoardItem n = b.withPoints(ox, oy, px, py);
-            applyTransform(it -> n);
-            return;
-        }
         float d0 = (float) Math.hypot(corners[handle * 2] - fx, corners[handle * 2 + 1] - fy);
         float d1 = (float) Math.hypot(px - fx, py - fy);
         final float s = Math.max(0.05f, d1 / Math.max(1, d0));
@@ -584,7 +711,14 @@ public class BoardView extends View {
                     RectF r = b.rect();
                     b = b.withPoints(r.left, r.top, r.right, r.bottom);
                 }
+                if (b.isLinear()) {
+                    BoardItem end = bindTargetAt(b.x2, b.y2, createStartBind);
+                    b = b.withBinds(createStartBind, end == null ? "" : end.id);
+                }
+                bindHint = null;
                 add(b);
+                updateBindings();
+                b = (BoardItem) page.items.get(page.items.size() - 1);
                 selection.clear();
                 selection.add(b);
                 if (!lockTool) {
@@ -610,8 +744,22 @@ public class BoardView extends View {
                 selChanged();
                 break;
             }
+            case M_ROTATE:
             case M_MOVE:
             case M_RESIZE:
+                if (mode == M_RESIZE && moved && selection.size() == 1 && selection.get(0) instanceof BoardItem
+                        && ((BoardItem) selection.get(0)).isLinear()) {
+                    BoardItem a = (BoardItem) selection.get(0);
+                    int idx = page.items.indexOf(a);
+                    float ex = handle == 0 ? a.x1 : a.x2, ey = handle == 0 ? a.y1 : a.y2;
+                    BoardItem tgt = bindTargetAt(ex, ey, handle == 0 ? a.endBind : a.startBind);
+                    String id = tgt == null ? "" : tgt.id;
+                    BoardItem n = handle == 0 ? a.withBinds(id, a.endBind) : a.withBinds(a.startBind, id);
+                    if (idx >= 0) page.items.set(idx, n);
+                    selection.set(0, n);
+                    updateBindings();
+                }
+                bindHint = null;
                 if (moved) {
                     pushUndo(snapshot);
                     changed();
@@ -639,6 +787,7 @@ public class BoardView extends View {
             case M_ERASE:
                 if (erased) {
                     pushUndo(snapshot);
+                    updateBindings();
                     changed();
                 }
                 eraserX = Float.NaN;
@@ -654,6 +803,7 @@ public class BoardView extends View {
             changed();
         }
         creating = null;
+        bindHint = null;
         penPreview = null;
         marquee = null;
         bufLen = 0;
@@ -718,6 +868,7 @@ public class BoardView extends View {
         else page.items.set(idx, n);
         selection.remove(old);
         if (n != null) selection.add(n);
+        updateBindings();
         changed();
         selChanged();
     }
@@ -754,6 +905,7 @@ public class BoardView extends View {
         }
         selection.clear();
         selection.addAll(ns);
+        updateBindings();
         changed();
     }
 
@@ -762,6 +914,7 @@ public class BoardView extends View {
         pushUndo(new ArrayList<>(page.items));
         page.items.removeAll(selection);
         selection.clear();
+        updateBindings();
         changed();
         selChanged();
     }
@@ -769,16 +922,30 @@ public class BoardView extends View {
     public void duplicateSelection() {
         if (selection.isEmpty()) return;
         pushUndo(new ArrayList<>(page.items));
+        java.util.Map<String, String> ids = new java.util.HashMap<>();
         List<Model.Item> ns = new ArrayList<>();
         for (Model.Item it : selection) {
-            Model.Item n = it.translated(24, 24);
-            if (n instanceof BoardItem) n = new BoardItem(((BoardItem) n).type, ((BoardItem) n).x1, ((BoardItem) n).y1,
-                    ((BoardItem) n).x2, ((BoardItem) n).y2, ((BoardItem) n).style, ((BoardItem) n).label, BoardItem.newSeed());
-            page.items.add(n);
+            Model.Item n;
+            if (it instanceof BoardItem) {
+                BoardItem b = (BoardItem) it;
+                BoardItem c = b.cloneMoved(24, 24, b.startBind, b.endBind);
+                ids.put(b.id, c.id);
+                n = c;
+            } else n = it.translated(24, 24);
             ns.add(n);
         }
+        for (int i = 0; i < ns.size(); i++) {
+            if (!(ns.get(i) instanceof BoardItem)) continue;
+            BoardItem b = (BoardItem) ns.get(i);
+            if (!b.isLinear()) continue;
+            String sb = ids.containsKey(b.startBind) ? ids.get(b.startBind) : "";
+            String eb = ids.containsKey(b.endBind) ? ids.get(b.endBind) : "";
+            ns.set(i, b.withBinds(sb, eb));
+        }
+        page.items.addAll(ns);
         selection.clear();
         selection.addAll(ns);
+        updateBindings();
         changed();
         selChanged();
     }
@@ -849,6 +1016,28 @@ public class BoardView extends View {
     }
 
     // ================================================================ exportação
+    /** Exporta o quadro como PDF vetorial de uma página do tamanho do conteúdo. */
+    public static void renderPdf(List<Model.Item> items, BoardRenderer r, java.io.OutputStream out) throws java.io.IOException {
+        RectF b = contentBounds(items);
+        if (b == null) b = new RectF(0, 0, 400, 300);
+        b.inset(-40, -40);
+        float s = Math.min(1f, 5000f / Math.max(b.width(), b.height()));
+        int w = Math.max(50, Math.round(b.width() * s)), h = Math.max(50, Math.round(b.height() * s));
+        android.graphics.pdf.PdfDocument doc = new android.graphics.pdf.PdfDocument();
+        try {
+            android.graphics.pdf.PdfDocument.Page pg = doc.startPage(new android.graphics.pdf.PdfDocument.PageInfo.Builder(w, h, 1).create());
+            Canvas c = pg.getCanvas();
+            c.drawColor(0xFFFFFFFF);
+            c.scale(s, s);
+            c.translate(-b.left, -b.top);
+            r.drawAll(c, items, null);
+            doc.finishPage(pg);
+            doc.writeTo(out);
+        } finally {
+            doc.close();
+        }
+    }
+
     /** Renderiza todo o conteúdo do quadro num bitmap (fundo branco, margem). */
     public static Bitmap render(List<Model.Item> items, BoardRenderer r, int maxDim, boolean grid) {
         RectF b = contentBounds(items);

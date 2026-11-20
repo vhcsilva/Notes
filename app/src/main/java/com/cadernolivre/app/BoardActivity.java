@@ -33,7 +33,7 @@ import java.util.concurrent.Executors;
 
 /** Editor do Quadro (tela infinita para diagramas e esboços). */
 public class BoardActivity extends Activity implements BoardView.Listener {
-    private static final int REQ_IMAGE = 1, REQ_EXPORT = 2;
+    private static final int REQ_IMAGE = 1, REQ_EXPORT = 2, REQ_EXPORT_PDF = 3;
     private static final String[] ICONS = {"cursor", "hand", "square", "diamond", "circle", "arrow", "line", "pen", "text", "eraser"};
     private static final String[] NAMES = {"Selecionar", "Mover tela", "Retângulo", "Losango", "Elipse", "Seta", "Linha", "Desenho livre", "Texto", "Borracha"};
     static final int[] STROKES = {0xFF1E1E1E, 0xFFE03131, 0xFF2F9E44, 0xFF1971C2, 0xFFF08C00, 0xFF9C36B5, 0xFF868E96, 0xFFFFFFFF};
@@ -221,7 +221,15 @@ public class BoardActivity extends Activity implements BoardView.Listener {
                     i.putExtra(Intent.EXTRA_TITLE, NotebookActivity.safeName(nb.title) + ".png");
                     try { startActivityForResult(i, REQ_EXPORT); } catch (Exception e) { Ui.toast(this, "Nenhum seletor de arquivos disponível."); }
                 })
-                .item("share", "Compartilhar imagem", this::shareImage)
+                .item("doc", "Exportar como PDF", "Vetorial: nítido em qualquer zoom", false, () -> {
+                    Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                    i.addCategory(Intent.CATEGORY_OPENABLE);
+                    i.setType("application/pdf");
+                    i.putExtra(Intent.EXTRA_TITLE, NotebookActivity.safeName(nb.title) + ".pdf");
+                    try { startActivityForResult(i, REQ_EXPORT_PDF); } catch (Exception e) { Ui.toast(this, "Nenhum seletor de arquivos disponível."); }
+                })
+                .item("share", "Compartilhar imagem", () -> share(false))
+                .item("share", "Compartilhar como PDF", () -> share(true))
                 .item("fit", "Ajustar ao conteúdo", bv::fitContent)
                 .item("selectall", "Selecionar tudo", bv::selectAll)
                 .item("grid", "Grade de pontos", bv.showGrid ? "Visível" : "Oculta", false, () -> {
@@ -444,6 +452,19 @@ public class BoardActivity extends Activity implements BoardView.Listener {
                     main.post(() -> Ui.toast(this, "Não foi possível inserir a imagem: " + e.getMessage()));
                 }
             });
+        } else if (req == REQ_EXPORT_PDF) {
+            Ui.toast(this, "Exportando PDF…");
+            final List<Model.Item> items = new java.util.ArrayList<>(bv.items());
+            bg.execute(() -> {
+                String msg;
+                try {
+                    OutputStream os = getContentResolver().openOutputStream(uri);
+                    try { BoardView.renderPdf(items, new BoardRenderer(new PageRenderer(dir, images)), os); } finally { os.close(); }
+                    msg = "PDF exportado.";
+                } catch (Throwable e) { msg = "Falha ao exportar: " + e.getMessage(); }
+                final String m = msg;
+                main.post(() -> Ui.toast(this, m));
+            });
         } else if (req == REQ_EXPORT) {
             Ui.toast(this, "Exportando…");
             final List<Model.Item> items = new java.util.ArrayList<>(bv.items());
@@ -462,18 +483,24 @@ public class BoardActivity extends Activity implements BoardView.Listener {
         }
     }
 
-    private void shareImage() {
+    private void share(final boolean pdf) {
         final List<Model.Item> items = new java.util.ArrayList<>(bv.items());
         bg.execute(() -> {
             try {
-                final File out = new File(ShareProvider.shareDir(this), NotebookActivity.safeName(nb.title) + ".png");
-                Bitmap bmp = BoardView.render(items, new BoardRenderer(new PageRenderer(dir, images)), 2400, false);
+                final File out = new File(ShareProvider.shareDir(this), NotebookActivity.safeName(nb.title) + (pdf ? ".pdf" : ".png"));
+                BoardRenderer r = new BoardRenderer(new PageRenderer(dir, images));
                 OutputStream os = new FileOutputStream(out);
-                try { bmp.compress(Bitmap.CompressFormat.PNG, 100, os); } finally { os.close(); }
-                bmp.recycle();
+                try {
+                    if (pdf) BoardView.renderPdf(items, r, os);
+                    else {
+                        Bitmap bmp = BoardView.render(items, r, 2400, false);
+                        bmp.compress(Bitmap.CompressFormat.PNG, 100, os);
+                        bmp.recycle();
+                    }
+                } finally { os.close(); }
                 main.post(() -> {
                     Intent s = new Intent(Intent.ACTION_SEND);
-                    s.setType("image/png");
+                    s.setType(pdf ? "application/pdf" : "image/png");
                     s.putExtra(Intent.EXTRA_STREAM, ShareProvider.uriFor(out));
                     s.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     startActivity(Intent.createChooser(s, "Compartilhar quadro"));

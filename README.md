@@ -31,7 +31,9 @@ Cada envio (`push`) para a branch `main` gera um APK novo automaticamente pelo G
 - Selecionar, mover, redimensionar (alças), seleção por área, duplicar, trazer para frente / enviar para trás
 - Toque duas vezes numa forma para escrever dentro dela
 - Cadeado para manter a ferramenta e desenhar várias formas seguidas
-- Zoom e rolagem livres, grade de pontos, exportar/compartilhar como PNG
+- Setas e linhas presas às formas: acompanham ao mover, redimensionar ou girar
+- Girar formas e textos (alça de rotação, encaixa a cada 15°)
+- Zoom e rolagem livres, grade de pontos, exportar/compartilhar como PNG ou PDF vetorial
 
 **Escrita e desenho**
 - Rolagem contínua entre páginas, com rolagem inercial

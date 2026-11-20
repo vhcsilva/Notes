@@ -50,6 +50,16 @@ public class BoardRenderer {
     }
 
     private void drawBoardItem(Canvas c, BoardItem b) {
+        if (b.angle != 0) {
+            float[] ctr = b.center();
+            c.save();
+            c.rotate((float) Math.toDegrees(b.angle), ctr[0], ctr[1]);
+            drawUnrotated(c, b);
+            c.restore();
+        } else drawUnrotated(c, b);
+    }
+
+    private void drawUnrotated(Canvas c, BoardItem b) {
         BoardItem.Style st = b.style;
         if (b.type == BoardItem.TEXT) {
             drawText(c, b.label, b.x1, b.y1, -1, 0, st);

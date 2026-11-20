@@ -685,6 +685,7 @@ public class MainActivity extends Activity {
                         + "• Modo só caneta: o dedo rola a página sem riscar\n"
                         + "• Laço → botão de texto: converte escrita em texto digitado\n"
                         + "• Quadro: toque duas vezes numa forma para escrever dentro dela; o cadeado mantém a ferramenta\n"
+                        + "• Quadro: comece ou termine uma seta sobre uma forma para prendê-la; a bolinha acima da forma gira\n"
                         + "• Toque e segure um caderno ou pasta para mais opções")
                 .setPositiveButton("OK", null).show();
     }
