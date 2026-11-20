@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- página -->
+    <path android:fillColor="#FFFFFF" android:pathData="M34,28h34a4,4 0,0 1,4 4v44a4,4 0,0 1,-4 4h-34a4,4 0,0 1,-4 -4v-44a4,4 0,0 1,4 -4z"/>
+    <path android:strokeColor="#9DB4D0" android:strokeWidth="1.6" android:pathData="M36,42h30M36,50h30M36,58h30M36,66h22"/>
+    <!-- traço manuscrito -->
+    <path android:strokeColor="#1E3A5F" android:strokeWidth="2.6" android:strokeLineCap="round"
+        android:pathData="M37,47c4,-6 7,-6 8,0s4,6 7,0s5,-5 7,1"/>
+    <!-- caneta -->
+    <path android:fillColor="#F2A541" android:pathData="M60,74l20,-20l5,5l-20,20z"/>
+    <path android:fillColor="#1E3A5F" android:pathData="M60,74l5,5l-7,2z"/>
+</vector>
