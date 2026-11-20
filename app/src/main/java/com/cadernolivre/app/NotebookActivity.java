@@ -11,6 +11,8 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.RectF;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.net.Uri;
@@ -18,23 +20,24 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.InputType;
+import android.text.TextUtils;
+import android.util.LruCache;
 import android.view.Gravity;
-import android.view.Menu;
-import android.view.MenuItem;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.widget.ArrayAdapter;
+import android.widget.AbsListView;
+import android.widget.BaseAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.GridView;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ListView;
-import android.widget.PopupMenu;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
+import android.widget.PopupWindow;
 import android.widget.SeekBar;
-import android.widget.Spinner;
 import android.widget.TextView;
 
 import java.io.File;
@@ -50,36 +53,53 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Editor de um caderno. */
+/** Editor de um caderno, com rolagem contínua entre páginas. */
 public class NotebookActivity extends Activity implements CanvasView.Listener {
     public static final String EXTRA_ID = "id";
     private static final int REQ_PDF = 1, REQ_IMAGE = 2, REQ_EXPORT_PDF = 3, REQ_EXPORT_PNG = 4, REQ_AUDIO_PERM = 5;
+    private static final String[] TOOL_ICONS = {"pen", "highlighter", "eraser", "lasso", "text", "shapes"};
+    private static final String[] TOOL_NAMES = {"Caneta", "Marca-texto", "Borracha", "Laço", "Texto", "Formas"};
 
     private Model.Notebook nb;
     private File dir;
-    private int pageIndex;
     private CanvasView cv;
     private PdfHelper pdf;
     private PageRenderer.ImageCache images;
     private PageRenderer renderer;
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
+    private final ExecutorService pdfExec = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
-    private boolean dirty;
+    private boolean dirty, changedThisSession;
+    private int current;
 
-    private TextView titleView, pageLabel, undoBtn, redoBtn, recBtn;
-    private final TextView[] toolBtns = new TextView[6];
-    private LinearLayout swatchRow;
-    private View selectionBar;
+    private TextView titleView, subtitleView, pageChip, recChip;
+    private ImageView undoBtn, redoBtn, colorDot;
+    private final ImageView[] toolBtns = new ImageView[6];
+    private LinearLayout selectionBar;
+    private View convertBtn;
+    private PopupWindow toolPopup;
 
     private MediaRecorder recorder;
     private File recordingFile;
+    private long recordStart;
     private MediaPlayer player;
+    private final LruCache<String, Bitmap> thumbCache = new LruCache<>(60);
 
     private final Runnable autosave = this::saveAsync;
+    private final Runnable hideChip = () -> pageChip.animate().alpha(0.55f).setDuration(400).start();
+    private final Runnable recTick = new Runnable() {
+        @Override public void run() {
+            if (recorder == null) return;
+            long s = (SystemClock.elapsedRealtime() - recordStart) / 1000;
+            recChip.setText(String.format(Locale.US, "●  %02d:%02d", s / 60, s % 60));
+            main.postDelayed(this, 1000);
+        }
+    };
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        Th.init(this);
         String id = getIntent().getStringExtra(EXTRA_ID);
         try {
             nb = Storage.load(this, id);
@@ -93,173 +113,166 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
         images = new PageRenderer.ImageCache();
         renderer = new PageRenderer(dir, images);
         prefs = getSharedPreferences("tools", MODE_PRIVATE);
-        getWindow().setStatusBarColor(Ui.PRIMARY);
+        Th.apply(this, Th.surface);
         buildUi();
         loadToolPrefs();
-        showPage(Math.max(0, Math.min(nb.lastPage, nb.pages.size() - 1)));
+        current = Math.max(0, Math.min(nb.lastPage, nb.pages.size() - 1));
+        cv.setNotebook(nb, current);
+        onVisiblePageChanged(current);
     }
 
     // ================================================================ interface
     private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(0xFFD9DEE4);
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Th.desk);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        root.addView(col, new FrameLayout.LayoutParams(-1, -1));
 
         // Barra superior
         LinearLayout top = new LinearLayout(this);
-        top.setBackgroundColor(Ui.PRIMARY);
+        top.setBackgroundColor(Th.surface);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        top.addView(Ui.button(this, "←", v -> finish()));
-        titleView = new TextView(this);
-        titleView.setTextColor(Color.WHITE);
-        titleView.setTextSize(17);
+        top.setPadding(Ui.dp(this, 4), Ui.dp(this, 4), Ui.dp(this, 4), Ui.dp(this, 4));
+        top.setElevation(Ui.dp(this, 2));
+        top.addView(Ui.iconButton(this, "back", Th.on, v -> finish()));
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
+        titles.setPadding(Ui.dp(this, 6), 0, Ui.dp(this, 6), 0);
+        titles.setBackground(Ui.ripple(0, Ui.dp(this, 8)));
+        titleView = Ui.text(this, nb.title, 16, Th.on, true);
         titleView.setSingleLine(true);
-        titleView.setText(nb.title);
-        titleView.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), 0);
-        titleView.setOnClickListener(v -> Ui.prompt(this, "Renomear caderno", nb.title, s -> {
+        titleView.setEllipsize(TextUtils.TruncateAt.END);
+        subtitleView = Ui.text(this, "", 12, Th.on2, false);
+        subtitleView.setSingleLine(true);
+        titles.addView(titleView);
+        titles.addView(subtitleView);
+        titles.setOnClickListener(v -> Ui.prompt(this, "Renomear caderno", nb.title, s -> {
             if (!s.isEmpty()) { nb.title = s; titleView.setText(s); markDirty(); }
         }));
-        top.addView(titleView, Ui.weight());
-        undoBtn = Ui.button(this, "↶", v -> cv.undo());
-        undoBtn.setTextSize(22);
-        redoBtn = Ui.button(this, "↷", v -> cv.redo());
-        redoBtn.setTextSize(22);
-        recBtn = Ui.button(this, "●", v -> toggleRecording());
-        recBtn.setVisibility(View.GONE);
-        recBtn.setTextColor(0xFFFF5252);
-        top.addView(recBtn);
+        top.addView(titles, Ui.weight());
+        recChip = Ui.text(this, "●  00:00", 13, Color.WHITE, true);
+        recChip.setBackground(Ui.ripple(0xFFE53935, Ui.dp(this, 14)));
+        recChip.setPadding(Ui.dp(this, 10), Ui.dp(this, 5), Ui.dp(this, 10), Ui.dp(this, 5));
+        recChip.setVisibility(View.GONE);
+        recChip.setOnClickListener(v -> stopRecording());
+        top.addView(recChip);
+        undoBtn = Ui.iconButton(this, "undo", Th.on, v -> cv.undo());
+        redoBtn = Ui.iconButton(this, "redo", Th.on, v -> cv.redo());
         top.addView(undoBtn);
         top.addView(redoBtn);
-        final TextView menuBtn = Ui.button(this, "⋮", null);
-        menuBtn.setTextSize(22);
-        menuBtn.setOnClickListener(v -> showMenu(menuBtn));
-        top.addView(menuBtn);
-        root.addView(top);
-
-        // Barra de ferramentas
-        HorizontalScrollView hs = new HorizontalScrollView(this);
-        hs.setHorizontalScrollBarEnabled(false);
-        hs.setBackgroundColor(0xFFF7F8FA);
-        LinearLayout tools = new LinearLayout(this);
-        tools.setGravity(Gravity.CENTER_VERTICAL);
-        tools.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), 0);
-        String[] labels = {"✒️", "🖍️", "🧽", "➰", "T", "⬜"};
-        String[] names = {"Caneta", "Marca-texto", "Borracha", "Laço", "Texto", "Formas"};
-        for (int i = 0; i < labels.length; i++) {
-            final int t = i;
-            TextView btn = new TextView(this);
-            btn.setText(labels[i] + "\n" + names[i]);
-            btn.setTextSize(11);
-            btn.setGravity(Gravity.CENTER);
-            btn.setTextColor(0xFF333333);
-            int p = Ui.dp(this, 6);
-            btn.setPadding(p * 2, p, p * 2, p);
-            btn.setOnClickListener(v -> {
-                if (cv.tool == t) showToolSettings();
-                else selectTool(t);
-            });
-            toolBtns[i] = btn;
-            tools.addView(btn);
-        }
-        TextView img = new TextView(this);
-        img.setText("🖼️\nImagem");
-        img.setTextSize(11);
-        img.setGravity(Gravity.CENTER);
-        img.setTextColor(0xFF333333);
-        int p = Ui.dp(this, 6);
-        img.setPadding(p * 2, p, p * 2, p);
-        img.setBackground(Ui.ripple(this));
-        img.setOnClickListener(v -> pickImage());
-        tools.addView(img);
-        View sep = new View(this);
-        sep.setBackgroundColor(0x22000000);
-        tools.addView(sep, new LinearLayout.LayoutParams(Ui.dp(this, 1), Ui.dp(this, 36)));
-        swatchRow = new LinearLayout(this);
-        swatchRow.setGravity(Gravity.CENTER_VERTICAL);
-        tools.addView(swatchRow);
-        hs.addView(tools);
-        root.addView(hs);
+        top.addView(Ui.iconButton(this, "pages", Th.on, v -> showPagesSheet()));
+        top.addView(Ui.iconButton(this, "more", Th.on, v -> showMenu()));
+        col.addView(top);
 
         // Área de desenho
         FrameLayout area = new FrameLayout(this);
         cv = new CanvasView(this);
         cv.setRenderer(renderer);
         cv.setListener(this);
+        cv.setPdfSource((page, w) -> pdfExec.execute(() -> {
+            final Bitmap bmp = pdf.render(page.pdf, page.pdfIndex, w);
+            main.post(() -> cv.setPdfBitmap(page, bmp));
+        }));
         area.addView(cv, new FrameLayout.LayoutParams(-1, -1));
 
-        LinearLayout sel = new LinearLayout(this);
-        sel.setBackground(Ui.round(0xEE263238, Ui.dp(this, 24)));
-        sel.setPadding(Ui.dp(this, 6), 0, Ui.dp(this, 6), 0);
-        sel.addView(Ui.button(this, "🗑", v -> cv.deleteSelection()));
-        sel.addView(Ui.button(this, "⧉", v -> cv.duplicateSelection()));
-        sel.addView(Ui.button(this, "🎨", v -> pickColorDialog("Cor da seleção", Ui.INK_COLORS, 0xFF000000, cv::recolorSelection)));
-        sel.addView(Ui.button(this, "－", v -> cv.scaleSelection(0.9f)));
-        sel.addView(Ui.button(this, "＋", v -> cv.scaleSelection(1.1f)));
-        sel.addView(Ui.button(this, "✓", v -> cv.clearSelection()));
-        FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        slp.topMargin = Ui.dp(this, 10);
-        area.addView(sel, slp);
-        sel.setVisibility(View.GONE);
-        selectionBar = sel;
-        root.addView(area, new LinearLayout.LayoutParams(-1, 0, 1f));
+        pageChip = Ui.text(this, "", 12, Color.WHITE, true);
+        pageChip.setBackground(Ui.round(0xCC1B1C22, Ui.dp(this, 14)));
+        pageChip.setPadding(Ui.dp(this, 12), Ui.dp(this, 5), Ui.dp(this, 12), Ui.dp(this, 5));
+        pageChip.setOnClickListener(v -> showPagesSheet());
+        FrameLayout.LayoutParams pcl = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+        pcl.setMargins(0, Ui.dp(this, 12), Ui.dp(this, 12), 0);
+        area.addView(pageChip, pcl);
 
-        // Navegação de páginas
-        LinearLayout nav = new LinearLayout(this);
-        nav.setBackgroundColor(Ui.PRIMARY);
-        nav.setGravity(Gravity.CENTER_VERTICAL);
-        nav.addView(Ui.button(this, "◀", v -> { if (pageIndex > 0) showPage(pageIndex - 1); }));
-        pageLabel = Ui.button(this, "", v -> showPagesDialog());
-        nav.addView(pageLabel, Ui.weight());
-        nav.addView(Ui.button(this, "▶", v -> { if (pageIndex < nb.pages.size() - 1) showPage(pageIndex + 1); }));
-        nav.addView(Ui.button(this, "＋ Página", v -> addPage(pageIndex + 1, nb.pages.get(pageIndex).blankLike())));
-        root.addView(nav);
+        // Barra de seleção
+        selectionBar = new LinearLayout(this);
+        selectionBar.setGravity(Gravity.CENTER_VERTICAL);
+        selectionBar.setBackground(Ui.round(Th.surface, Ui.dp(this, 26)));
+        selectionBar.setElevation(Ui.dp(this, 8));
+        selectionBar.setPadding(Ui.dp(this, 6), Ui.dp(this, 2), Ui.dp(this, 6), Ui.dp(this, 2));
+        selectionBar.addView(Ui.iconButton(this, "trash", Th.danger, v -> cv.deleteSelection()));
+        selectionBar.addView(Ui.iconButton(this, "copy", Th.on, v -> cv.duplicateSelection()));
+        selectionBar.addView(Ui.iconButton(this, "palette", Th.on, v -> colorSheet("Cor da seleção", Ui.INK_COLORS, 0xFF000000, cv::recolorSelection)));
+        selectionBar.addView(Ui.iconButton(this, "minus", Th.on, v -> cv.scaleSelection(0.9f)));
+        selectionBar.addView(Ui.iconButton(this, "plus", Th.on, v -> cv.scaleSelection(1.1f)));
+        convertBtn = Ui.iconButton(this, "convert", Th.primary, v -> convertToText());
+        selectionBar.addView(convertBtn);
+        selectionBar.addView(Ui.iconButton(this, "close", Th.on2, v -> cv.clearSelection()));
+        selectionBar.setVisibility(View.GONE);
+        FrameLayout.LayoutParams sl = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        sl.bottomMargin = Ui.dp(this, 88);
+        area.addView(selectionBar, sl);
 
+        // Dock de ferramentas flutuante
+        HorizontalScrollView dockScroll = new HorizontalScrollView(this);
+        dockScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout dock = new LinearLayout(this);
+        dock.setGravity(Gravity.CENTER_VERTICAL);
+        dock.setBackground(Ui.round(Th.surface, Ui.dp(this, 30)));
+        dock.setElevation(Ui.dp(this, 10));
+        dock.setPadding(Ui.dp(this, 8), Ui.dp(this, 6), Ui.dp(this, 8), Ui.dp(this, 6));
+        for (int i = 0; i < TOOL_ICONS.length; i++) {
+            final int t = i;
+            ImageView b = new ImageView(this);
+            int p = Ui.dp(this, 11);
+            b.setPadding(p, p, p, p);
+            b.setContentDescription(TOOL_NAMES[i]);
+            b.setOnClickListener(v -> {
+                if (cv.tool == t) showToolPopup(v);
+                else selectTool(t);
+            });
+            b.setOnLongClickListener(v -> { selectTool(t); showToolPopup(v); return true; });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(this, 46), Ui.dp(this, 46));
+            lp.setMargins(Ui.dp(this, 1), 0, Ui.dp(this, 1), 0);
+            dock.addView(b, lp);
+            toolBtns[i] = b;
+        }
+        ImageView img = Ui.iconButton(this, "image", Th.on, v -> pickImage());
+        img.setContentDescription("Imagem");
+        dock.addView(img, new LinearLayout.LayoutParams(Ui.dp(this, 46), Ui.dp(this, 46)));
+        View sep = new View(this);
+        sep.setBackgroundColor(Th.outline);
+        LinearLayout.LayoutParams spl = new LinearLayout.LayoutParams(Ui.dp(this, 1), Ui.dp(this, 28));
+        spl.setMargins(Ui.dp(this, 6), 0, Ui.dp(this, 6), 0);
+        dock.addView(sep, spl);
+        colorDot = new ImageView(this);
+        colorDot.setContentDescription("Cor e espessura");
+        colorDot.setOnClickListener(v -> showToolPopup(toolBtns[Math.min(cv.tool, 5)]));
+        LinearLayout.LayoutParams cdl = new LinearLayout.LayoutParams(Ui.dp(this, 34), Ui.dp(this, 34));
+        cdl.setMargins(Ui.dp(this, 4), 0, Ui.dp(this, 6), 0);
+        dock.addView(colorDot, cdl);
+        dockScroll.addView(dock);
+        dockScroll.setClipToPadding(false);
+        dockScroll.setPadding(Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12));
+        FrameLayout.LayoutParams dl = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        dl.bottomMargin = Ui.dp(this, 6);
+        area.addView(dockScroll, dl);
+
+        col.addView(area, new LinearLayout.LayoutParams(-1, 0, 1f));
         setContentView(root);
     }
 
-    private void showMenu(View anchor) {
-        PopupMenu pm = new PopupMenu(this, anchor);
-        Menu m = pm.getMenu();
-        m.add(0, 1, 0, "Páginas…");
-        m.add(0, 2, 0, "Modelo / cor do papel");
-        m.add(0, 3, 0, "Importar PDF neste caderno");
-        m.add(0, 4, 0, "Inserir imagem");
-        m.add(0, 5, 0, recorder == null ? "Gravar áudio" : "Parar gravação");
-        m.add(0, 6, 0, "Gravações de áudio");
-        m.add(0, 7, 0, "Exportar como PDF");
-        m.add(0, 8, 0, "Compartilhar como PDF");
-        m.add(0, 9, 0, "Exportar página como imagem");
-        MenuItem so = m.add(0, 10, 0, "Modo só caneta (dedo rola)");
-        so.setCheckable(true);
-        so.setChecked(cv.stylusOnly);
-        m.add(0, 11, 0, "Ajustar à tela");
-        m.add(0, 12, 0, "Limpar página");
-        m.add(0, 13, 0, "Excluir página");
-        pm.setOnMenuItemClickListener(this::onMenu);
-        pm.show();
-    }
-
-    private boolean onMenu(MenuItem it) {
-        switch (it.getItemId()) {
-            case 1: showPagesDialog(); break;
-            case 2: templateDialog(); break;
-            case 3: openDoc("application/pdf", REQ_PDF); break;
-            case 4: pickImage(); break;
-            case 5: toggleRecording(); break;
-            case 6: recordingsDialog(); break;
-            case 7: createDoc("application/pdf", safeName(nb.title) + ".pdf", REQ_EXPORT_PDF); break;
-            case 8: sharePdf(); break;
-            case 9: createDoc("image/png", safeName(nb.title) + "-p" + (pageIndex + 1) + ".png", REQ_EXPORT_PNG); break;
-            case 10:
-                cv.stylusOnly = !cv.stylusOnly;
-                prefs.edit().putBoolean("stylusOnly", cv.stylusOnly).apply();
-                Ui.toast(this, cv.stylusOnly ? "Só a caneta escreve; use o dedo para rolar." : "Dedo e caneta escrevem.");
-                break;
-            case 11: cv.fit(); break;
-            case 12: cv.clearPage(); break;
-            case 13: confirmDeletePage(pageIndex); break;
-        }
-        return true;
+    private void showMenu() {
+        Model.Page p = nb.pages.get(current);
+        Ui.Sheet s = new Ui.Sheet(this, nb.title);
+        s.item("plus", "Adicionar página", "Logo após a página " + (current + 1), false, () -> addPage(current + 1, p.blankLike()));
+        s.item("paper", "Papel e modelo", p.pdf != null ? "Página de PDF" : Model.templateName(p.template), false, this::templateSheet);
+        s.item("import", "Importar PDF", "Adiciona as páginas ao final", false, () -> openDoc("application/pdf", REQ_PDF));
+        s.item("image", "Inserir imagem", this::pickImage);
+        s.item(recorder == null ? "mic" : "stop", recorder == null ? "Gravar áudio" : "Parar gravação", this::toggleRecording);
+        s.item("play", "Gravações", this::recordingsSheet);
+        s.item("export", "Exportar como PDF", () -> createDoc("application/pdf", safeName(nb.title) + ".pdf", REQ_EXPORT_PDF));
+        s.item("share", "Compartilhar como PDF", this::sharePdf);
+        s.item("image", "Salvar página como imagem", () -> createDoc("image/png", safeName(nb.title) + "-p" + (current + 1) + ".png", REQ_EXPORT_PNG));
+        s.item("hand", "Modo só caneta", cv.stylusOnly ? "Ativado: o dedo só rola a página" : "Desativado: dedo e caneta escrevem", false, () -> {
+            cv.stylusOnly = !cv.stylusOnly;
+            prefs.edit().putBoolean("stylusOnly", cv.stylusOnly).apply();
+            Ui.toast(this, cv.stylusOnly ? "Modo só caneta ativado." : "Modo só caneta desativado.");
+        });
+        s.item("fit", "Ajustar à tela", cv::fit);
+        s.item("eraser", "Limpar página", null, false, () -> cv.clearPage(nb.pages.get(current)));
+        s.item("trash", "Excluir página", null, true, () -> confirmDeletePage(current));
+        s.show();
     }
 
     // ================================================================ ferramentas
@@ -269,6 +282,7 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
         cv.hlColor = prefs.getInt("hlColor", 0xFFFFEB3B);
         cv.hlWidth = prefs.getFloat("hlWidth", 26f);
         cv.eraserSize = prefs.getFloat("eraserSize", 18f);
+        cv.partialEraser = prefs.getBoolean("partialEraser", true);
         cv.textColor = prefs.getInt("textColor", 0xFF000000);
         cv.textSize = prefs.getFloat("textSize", 34f);
         cv.shapeType = prefs.getInt("shapeType", CanvasView.SHAPE_RECT);
@@ -279,17 +293,19 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
     private void saveToolPrefs() {
         prefs.edit().putInt("penColor", cv.penColor).putFloat("penWidth", cv.penWidth)
                 .putInt("hlColor", cv.hlColor).putFloat("hlWidth", cv.hlWidth)
-                .putFloat("eraserSize", cv.eraserSize).putInt("textColor", cv.textColor)
-                .putFloat("textSize", cv.textSize).putInt("shapeType", cv.shapeType)
-                .putInt("tool", cv.tool).apply();
+                .putFloat("eraserSize", cv.eraserSize).putBoolean("partialEraser", cv.partialEraser)
+                .putInt("textColor", cv.textColor).putFloat("textSize", cv.textSize)
+                .putInt("shapeType", cv.shapeType).putInt("tool", cv.tool).apply();
     }
 
     private void selectTool(int t) {
         cv.setTool(t);
         for (int i = 0; i < toolBtns.length; i++) {
-            toolBtns[i].setBackground(i == t ? Ui.round(0x332196F3, Ui.dp(this, 10)) : Ui.ripple(this));
+            boolean sel = i == t;
+            toolBtns[i].setImageDrawable(Icons.of(TOOL_ICONS[i], sel ? Th.primary : Th.on));
+            toolBtns[i].setBackground(sel ? Ui.ripple(Th.primarySoft, Ui.dp(this, 23)) : Ui.ripple(0, Ui.dp(this, 23)));
         }
-        refreshSwatches();
+        refreshColorDot();
         saveToolPrefs();
     }
 
@@ -305,81 +321,75 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
         if (cv.tool == CanvasView.TOOL_HIGHLIGHTER) cv.hlColor = c;
         else if (cv.tool == CanvasView.TOOL_TEXT) cv.textColor = c;
         else cv.penColor = c;
-        refreshSwatches();
+        refreshColorDot();
         saveToolPrefs();
     }
 
-    private void refreshSwatches() {
-        swatchRow.removeAllViews();
-        int t = cv.tool;
-        if (t == CanvasView.TOOL_ERASER || t == CanvasView.TOOL_LASSO) {
-            TextView tip = new TextView(this);
-            tip.setText(t == CanvasView.TOOL_ERASER ? "  Toque de novo na borracha para mudar o tamanho" : "  Circule itens para mover, redimensionar ou apagar");
-            tip.setTextSize(12);
-            tip.setTextColor(0xFF666666);
-            swatchRow.addView(tip);
-            return;
-        }
-        int[] pal = t == CanvasView.TOOL_HIGHLIGHTER ? Ui.HL_COLORS
-                : new int[]{0xFF000000, 0xFF1A237E, 0xFF1976D2, 0xFFD32F2F, 0xFF388E3C, 0xFFF57C00, 0xFF7B1FA2};
-        int cur = currentColor();
-        for (final int c : pal) {
-            View s = Ui.swatch(this, c, (c | 0xFF000000) == (cur | 0xFF000000), 28);
-            s.setOnClickListener(v -> setCurrentColor(c));
-            swatchRow.addView(s);
-        }
-        TextView more = new TextView(this);
-        more.setText("⚙︎");
-        more.setTextSize(20);
-        more.setTextColor(0xFF333333);
-        more.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 10), 0);
-        more.setOnClickListener(v -> showToolSettings());
-        swatchRow.addView(more);
+    private void refreshColorDot() {
+        boolean noColor = cv.tool == CanvasView.TOOL_ERASER || cv.tool == CanvasView.TOOL_LASSO;
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(noColor ? Th.surface2 : currentColor());
+        g.setStroke(Ui.dp(this, 2), Th.outline);
+        colorDot.setImageDrawable(noColor ? Icons.of("tune", Th.on2) : null);
+        int p = Ui.dp(this, 7);
+        colorDot.setPadding(p, p, p, p);
+        colorDot.setBackground(g);
     }
 
-    private void showToolSettings() {
+    /** Painel flutuante com cor, espessura e opções da ferramenta atual. */
+    private void showToolPopup(final View anchor) {
+        if (toolPopup != null) toolPopup.dismiss();
         final int t = cv.tool;
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        int p = Ui.dp(this, 20);
-        box.setPadding(p, p / 2, p, 0);
-        final AlertDialog[] dlg = new AlertDialog[1];
+        box.setBackground(Ui.round(Th.surface, Ui.dp(this, 20)));
+        box.setElevation(Ui.dp(this, 12));
+        int p = Ui.dp(this, 16);
+        box.setPadding(p, p, p, p);
+        box.addView(Ui.text(this, TOOL_NAMES[t], 15, Th.on, true));
 
         if (t == CanvasView.TOOL_SHAPE) {
-            RadioGroup rg = new RadioGroup(this);
-            rg.setOrientation(RadioGroup.HORIZONTAL);
+            LinearLayout chips = new LinearLayout(this);
+            chips.setPadding(0, Ui.dp(this, 8), 0, 0);
             String[] sh = {"Linha", "Retângulo", "Elipse", "Seta"};
             for (int i = 0; i < sh.length; i++) {
-                RadioButton rb = new RadioButton(this);
-                rb.setText(sh[i]);
-                rb.setId(100 + i);
-                rg.addView(rb);
+                final int idx = i;
+                chips.addView(Ui.chip(this, sh[i], cv.shapeType == i, v -> {
+                    cv.shapeType = idx;
+                    saveToolPrefs();
+                    showToolPopup(anchor);
+                }));
             }
-            rg.check(100 + cv.shapeType);
-            rg.setOnCheckedChangeListener((g, id) -> { cv.shapeType = id - 100; saveToolPrefs(); });
-            box.addView(rg);
+            box.addView(chips);
         }
-        if (t != CanvasView.TOOL_ERASER && t != CanvasView.TOOL_LASSO) {
-            box.addView(Ui.colorGrid(this, t == CanvasView.TOOL_HIGHLIGHTER ? Ui.HL_COLORS : Ui.INK_COLORS, currentColor(), c -> {
-                setCurrentColor(c);
-                if (dlg[0] != null) dlg[0].dismiss();
-            }));
+        if (t == CanvasView.TOOL_ERASER) {
+            LinearLayout chips = new LinearLayout(this);
+            chips.setPadding(0, Ui.dp(this, 8), 0, 0);
+            chips.addView(Ui.chip(this, "Parcial", cv.partialEraser, v -> { cv.partialEraser = true; saveToolPrefs(); showToolPopup(anchor); }));
+            chips.addView(Ui.chip(this, "Traço inteiro", !cv.partialEraser, v -> { cv.partialEraser = false; saveToolPrefs(); showToolPopup(anchor); }));
+            box.addView(chips);
+        }
+        if (t == CanvasView.TOOL_LASSO) {
+            TextView tip = Ui.text(this, "Circule itens para mover, redimensionar, recolorir, duplicar, apagar ou converter escrita em texto.", 13, Th.on2, false);
+            tip.setPadding(0, Ui.dp(this, 6), 0, 0);
+            tip.setMaxWidth(Ui.dp(this, 280));
+            box.addView(tip);
         }
         if (t != CanvasView.TOOL_LASSO) {
-            final TextView lbl = new TextView(this);
-            box.addView(lbl);
-            SeekBar sb = new SeekBar(this);
             final float min, max;
             final float[] val = new float[1];
             final String name;
             if (t == CanvasView.TOOL_HIGHLIGHTER) { min = 8; max = 70; val[0] = cv.hlWidth; name = "Espessura"; }
-            else if (t == CanvasView.TOOL_ERASER) { min = 4; max = 80; val[0] = cv.eraserSize; name = "Tamanho da borracha"; }
+            else if (t == CanvasView.TOOL_ERASER) { min = 4; max = 80; val[0] = cv.eraserSize; name = "Tamanho"; }
             else if (t == CanvasView.TOOL_TEXT) { min = 14; max = 120; val[0] = cv.textSize; name = "Tamanho do texto"; }
             else { min = 1; max = 30; val[0] = cv.penWidth; name = "Espessura"; }
+            final TextView lbl = Ui.text(this, name + ": " + Math.round(val[0]), 13, Th.on2, false);
+            lbl.setPadding(0, Ui.dp(this, 12), 0, 0);
+            box.addView(lbl);
+            SeekBar sb = new SeekBar(this);
             sb.setMax(100);
             sb.setProgress(Math.round((val[0] - min) / (max - min) * 100));
-            lbl.setText(name + ": " + Math.round(val[0]));
-            lbl.setPadding(0, Ui.dp(this, 12), 0, 0);
             sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                 @Override public void onProgressChanged(SeekBar s, int v, boolean u) {
                     float x = min + (max - min) * v / 100f;
@@ -392,127 +402,217 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
                 @Override public void onStartTrackingTouch(SeekBar s) {}
                 @Override public void onStopTrackingTouch(SeekBar s) { saveToolPrefs(); }
             });
-            box.addView(sb);
+            box.addView(sb, new LinearLayout.LayoutParams(Ui.dp(this, 280), -2));
         }
-        dlg[0] = new AlertDialog.Builder(this).setTitle("Ajustes da ferramenta").setView(box)
-                .setPositiveButton("OK", null).show();
+        if (t != CanvasView.TOOL_ERASER && t != CanvasView.TOOL_LASSO) {
+            View grid = Ui.colorGrid(this, t == CanvasView.TOOL_HIGHLIGHTER ? Ui.HL_COLORS : Ui.INK_COLORS, currentColor(), c -> {
+                setCurrentColor(c);
+                if (toolPopup != null) toolPopup.dismiss();
+            });
+            grid.setPadding(0, Ui.dp(this, 8), 0, 0);
+            box.addView(grid);
+        }
+        FrameLayout wrap = new FrameLayout(this);
+        int m = Ui.dp(this, 14);
+        wrap.setPadding(m, m, m, m);
+        wrap.addView(box);
+        toolPopup = new PopupWindow(wrap, -2, -2, true);
+        toolPopup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        toolPopup.setOutsideTouchable(true);
+        toolPopup.setAnimationStyle(android.R.style.Animation_Dialog);
+        wrap.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        int[] loc = new int[2];
+        anchor.getLocationInWindow(loc);
+        int x = Math.max(0, Math.min(getWindow().getDecorView().getWidth() - wrap.getMeasuredWidth(),
+                loc[0] + anchor.getWidth() / 2 - wrap.getMeasuredWidth() / 2));
+        int y = Math.max(0, loc[1] - wrap.getMeasuredHeight());
+        toolPopup.showAtLocation(anchor, Gravity.NO_GRAVITY, x, y);
     }
 
-    private void pickColorDialog(String title, int[] pal, int cur, final Ui.IntCallback cb) {
-        final AlertDialog[] d = new AlertDialog[1];
-        LinearLayout box = new LinearLayout(this);
-        int p = Ui.dp(this, 20);
-        box.setPadding(p, p / 2, p, 0);
-        box.addView(Ui.colorGrid(this, pal, cur, c -> { cb.on(c); if (d[0] != null) d[0].dismiss(); }));
-        d[0] = new AlertDialog.Builder(this).setTitle(title).setView(box).setNegativeButton("Fechar", null).show();
+    private void colorSheet(String title, int[] pal, int cur, final Ui.IntCallback cb) {
+        final Ui.Sheet[] s = new Ui.Sheet[1];
+        s[0] = new Ui.Sheet(this, title);
+        View grid = Ui.colorGrid(this, pal, cur, c -> { cb.on(c); s[0].dismiss(); });
+        grid.setPadding(Ui.dp(this, 18), 0, Ui.dp(this, 18), Ui.dp(this, 8));
+        s[0].view(grid).show();
     }
 
     // ================================================================ páginas
-    private void showPage(int i) {
-        cv.clearSelection();
-        pageIndex = i;
+    @Override public void onVisiblePageChanged(int i) {
+        if (i < 0 || i >= nb.pages.size()) return;
+        current = i;
         nb.lastPage = i;
-        final Model.Page p = nb.pages.get(i);
-        cv.setPage(p);
-        pageLabel.setText("Página " + (i + 1) + " de " + nb.pages.size());
-        if (p.pdf != null) {
-            final int w = Math.min(2200, Math.max(1200, getResources().getDisplayMetrics().widthPixels * 2));
-            bg.execute(() -> {
-                final Bitmap bmp = pdf.render(p.pdf, p.pdfIndex, w);
-                main.post(() -> { if (cv.getPage() == p) cv.setPdfBitmap(bmp); });
-            });
-        }
-        onHistoryChanged();
+        pageChip.setText((i + 1) + " / " + nb.pages.size());
+        subtitleView.setText("Página " + (i + 1) + " de " + nb.pages.size());
+        pageChip.animate().cancel();
+        pageChip.setAlpha(1f);
+        main.removeCallbacks(hideChip);
+        main.postDelayed(hideChip, 1500);
+    }
+
+    private void pagesChanged() {
+        markDirty();
+        cv.relayout();
+        thumbCache.evictAll();
+        onVisiblePageChanged(Math.min(current, nb.pages.size() - 1));
     }
 
     private void addPage(int at, Model.Page p) {
         nb.pages.add(at, p);
-        markDirty();
-        showPage(at);
+        pagesChanged();
+        cv.scrollToPage(at);
+        onVisiblePageChanged(at);
     }
 
     private void confirmDeletePage(final int i) {
-        new AlertDialog.Builder(this).setTitle("Excluir página " + (i + 1) + "?")
-                .setMessage("Esta ação não pode ser desfeita.")
-                .setPositiveButton("Excluir", (d, w) -> {
-                    Model.Page removed = nb.pages.remove(i);
-                    cv.forgetHistory(removed);
-                    if (nb.pages.isEmpty()) nb.pages.add(new Model.Page());
-                    markDirty();
-                    showPage(Math.min(i, nb.pages.size() - 1));
-                }).setNegativeButton("Cancelar", null).show();
+        Ui.confirm(this, "Excluir página " + (i + 1) + "?", "Esta ação não pode ser desfeita.", "Excluir", () -> {
+            nb.pages.remove(i);
+            if (nb.pages.isEmpty()) nb.pages.add(new Model.Page());
+            int to = Math.min(i, nb.pages.size() - 1);
+            current = to;
+            pagesChanged();
+            cv.scrollToPage(to);
+            onVisiblePageChanged(to);
+        });
     }
 
-    private void showPagesDialog() {
-        List<String> rows = new ArrayList<>();
-        for (int i = 0; i < nb.pages.size(); i++) {
-            Model.Page p = nb.pages.get(i);
-            String kind = p.pdf != null ? "PDF, pág. " + (p.pdfIndex + 1) : Model.templateName(p.template);
-            rows.add((i == pageIndex ? "▶ " : "   ") + "Página " + (i + 1) + "  ·  " + kind + (p.items.isEmpty() ? "" : "  ·  " + p.items.size() + " itens"));
-        }
-        final ListView lv = new ListView(this);
-        lv.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, rows));
-        final AlertDialog d = new AlertDialog.Builder(this).setTitle("Páginas (toque longo para opções)").setView(lv)
-                .setNegativeButton("Fechar", null)
-                .setPositiveButton("Nova página no fim", (x, w) -> addPage(nb.pages.size(), nb.pages.get(nb.pages.size() - 1).blankLike()))
-                .create();
-        lv.setOnItemClickListener((a, v, pos, id) -> { d.dismiss(); showPage(pos); });
-        lv.setOnItemLongClickListener((a, v, pos, id) -> { d.dismiss(); pageOptions(pos); return true; });
-        lv.setSelection(Math.max(0, pageIndex - 2));
-        d.show();
+    private String thumbKey(Model.Page p) {
+        return System.identityHashCode(p) + ":" + System.identityHashCode(p.items) + ":" + p.items.size() + ":" + p.template + p.paperColor;
+    }
+
+    private void showPagesSheet() {
+        final Ui.Sheet s = new Ui.Sheet(this, nb.pages.size() + (nb.pages.size() == 1 ? " página" : " páginas"), false);
+        LinearLayout actions = new LinearLayout(this);
+        actions.setPadding(Ui.dp(this, 20), 0, Ui.dp(this, 20), Ui.dp(this, 8));
+        TextView add = Ui.pill(this, "＋  Nova página", true, v -> {
+            s.dismiss();
+            addPage(nb.pages.size(), nb.pages.get(nb.pages.size() - 1).blankLike());
+        });
+        actions.addView(add);
+        TextView hint = Ui.text(this, "Toque e segure para opções", 12, Th.on2, false);
+        hint.setPadding(Ui.dp(this, 14), 0, 0, 0);
+        hint.setGravity(Gravity.CENTER_VERTICAL);
+        actions.addView(hint, new LinearLayout.LayoutParams(-2, -1));
+        s.view(actions);
+
+        final GridView grid = new GridView(this);
+        grid.setNumColumns(GridView.AUTO_FIT);
+        grid.setColumnWidth(Ui.dp(this, 104));
+        grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
+        grid.setVerticalSpacing(Ui.dp(this, 12));
+        grid.setHorizontalSpacing(Ui.dp(this, 10));
+        grid.setPadding(Ui.dp(this, 16), Ui.dp(this, 4), Ui.dp(this, 16), Ui.dp(this, 8));
+        grid.setClipToPadding(false);
+        grid.setAdapter(new BaseAdapter() {
+            @Override public int getCount() { return nb.pages.size(); }
+            @Override public Object getItem(int i) { return nb.pages.get(i); }
+            @Override public long getItemId(int i) { return i; }
+            @Override public View getView(int pos, View convert, ViewGroup parent) {
+                LinearLayout cell;
+                ImageView iv;
+                TextView label;
+                if (convert == null) {
+                    cell = new LinearLayout(NotebookActivity.this);
+                    cell.setOrientation(LinearLayout.VERTICAL);
+                    cell.setGravity(Gravity.CENTER_HORIZONTAL);
+                    cell.setLayoutParams(new AbsListView.LayoutParams(-1, -2));
+                    iv = new ImageView(NotebookActivity.this);
+                    iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                    int pd = Ui.dp(NotebookActivity.this, 3);
+                    iv.setPadding(pd, pd, pd, pd);
+                    cell.addView(iv, new LinearLayout.LayoutParams(-1, Ui.dp(NotebookActivity.this, 136)));
+                    label = Ui.text(NotebookActivity.this, "", 12, Th.on2, true);
+                    label.setPadding(0, Ui.dp(NotebookActivity.this, 4), 0, 0);
+                    cell.addView(label);
+                } else {
+                    cell = (LinearLayout) convert;
+                    iv = (ImageView) cell.getChildAt(0);
+                    label = (TextView) cell.getChildAt(1);
+                }
+                final Model.Page p = nb.pages.get(pos);
+                boolean cur = pos == current;
+                label.setText(String.valueOf(pos + 1));
+                label.setTextColor(cur ? Th.primary : Th.on2);
+                iv.setBackground(cur ? Ui.stroke(Th.surface2, Th.primary, Ui.dp(NotebookActivity.this, 2), Ui.dp(NotebookActivity.this, 6))
+                        : Ui.stroke(Th.surface2, Th.outline, Ui.dp(NotebookActivity.this, 1), Ui.dp(NotebookActivity.this, 6)));
+                final String key = thumbKey(p);
+                Bitmap bm = thumbCache.get(key);
+                iv.setImageBitmap(bm);
+                iv.setTag(key);
+                if (bm == null) {
+                    final ImageView target = iv;
+                    pdfExec.execute(() -> {
+                        final Bitmap b = new PageRenderer(dir, images).renderBitmap(p, 220, pdf);
+                        main.post(() -> {
+                            thumbCache.put(key, b);
+                            if (key.equals(target.getTag())) target.setImageBitmap(b);
+                        });
+                    });
+                }
+                return cell;
+            }
+        });
+        grid.setOnItemClickListener((a, v, pos, id) -> { s.dismiss(); cv.scrollToPage(pos); onVisiblePageChanged(pos); });
+        grid.setOnItemLongClickListener((a, v, pos, id) -> { s.dismiss(); pageOptions(pos); return true; });
+        grid.setSelection(Math.max(0, current - 2));
+        int h = (int) (getResources().getDisplayMetrics().heightPixels * 0.62f);
+        s.view(grid);
+        grid.setLayoutParams(new LinearLayout.LayoutParams(-1, h));
+        s.show();
     }
 
     private void pageOptions(final int i) {
-        String[] opts = {"Ir para a página", "Duplicar", "Mover para cima", "Mover para baixo", "Inserir página em branco depois", "Excluir"};
-        new AlertDialog.Builder(this).setTitle("Página " + (i + 1)).setItems(opts, (d, w) -> {
-            switch (w) {
-                case 0: showPage(i); break;
-                case 1: addPage(i + 1, nb.pages.get(i).copy()); break;
-                case 2: if (i > 0) { nb.pages.add(i - 1, nb.pages.remove(i)); markDirty(); showPage(i - 1); } break;
-                case 3: if (i < nb.pages.size() - 1) { nb.pages.add(i + 1, nb.pages.remove(i)); markDirty(); showPage(i + 1); } break;
-                case 4: addPage(i + 1, nb.pages.get(i).blankLike()); break;
-                case 5: confirmDeletePage(i); break;
-            }
-        }).show();
+        Ui.Sheet s = new Ui.Sheet(this, "Página " + (i + 1));
+        s.item("chevron", "Ir para a página", () -> { cv.scrollToPage(i); onVisiblePageChanged(i); });
+        s.item("copy", "Duplicar", () -> addPage(i + 1, nb.pages.get(i).copy()));
+        s.item("plus", "Inserir página em branco depois", () -> addPage(i + 1, nb.pages.get(i).blankLike()));
+        if (i > 0) s.item("undo", "Mover para cima", () -> {
+            nb.pages.add(i - 1, nb.pages.remove(i));
+            pagesChanged();
+            cv.scrollToPage(i - 1);
+        });
+        if (i < nb.pages.size() - 1) s.item("redo", "Mover para baixo", () -> {
+            nb.pages.add(i + 1, nb.pages.remove(i));
+            pagesChanged();
+            cv.scrollToPage(i + 1);
+        });
+        s.item("trash", "Excluir", null, true, () -> confirmDeletePage(i));
+        s.show();
     }
 
-    private void templateDialog() {
-        final Model.Page p = nb.pages.get(pageIndex);
+    private void templateSheet() {
+        final Model.Page p = nb.pages.get(current);
         if (p.pdf != null) {
             Ui.toast(this, "Páginas de PDF não têm modelo de papel. Adicione uma nova página para escolher um modelo.");
             return;
         }
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = Ui.dp(this, 20);
-        box.setPadding(pad, pad / 2, pad, 0);
-        final Spinner tpl = new Spinner(this);
-        tpl.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, Model.TEMPLATE_NAMES));
-        tpl.setSelection(Math.max(0, Arrays.asList(Model.TEMPLATES).indexOf(p.template)));
-        final Spinner paper = new Spinner(this);
-        paper.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, Model.PAPER_NAMES));
         int pi = 0;
         for (int i = 0; i < Model.PAPER_COLORS.length; i++) if (Model.PAPER_COLORS[i] == p.paperColor) pi = i;
-        paper.setSelection(pi);
-        TextView l1 = new TextView(this); l1.setText("Modelo");
-        TextView l2 = new TextView(this); l2.setText("Cor do papel");
-        box.addView(l1); box.addView(tpl); box.addView(l2); box.addView(paper);
-        new AlertDialog.Builder(this).setTitle("Papel").setView(box)
-                .setPositiveButton("Esta página", (d, w) -> {
-                    p.template = Model.TEMPLATES[tpl.getSelectedItemPosition()];
-                    p.paperColor = Model.PAPER_COLORS[paper.getSelectedItemPosition()];
-                    markDirty();
-                    cv.invalidate();
-                })
-                .setNeutralButton("Todas as páginas", (d, w) -> {
-                    for (Model.Page q : nb.pages) if (q.pdf == null) {
-                        q.template = Model.TEMPLATES[tpl.getSelectedItemPosition()];
-                        q.paperColor = Model.PAPER_COLORS[paper.getSelectedItemPosition()];
-                    }
-                    markDirty();
-                    cv.invalidate();
-                })
-                .setNegativeButton("Cancelar", null).show();
+        final int[] sel = {Math.max(0, Arrays.asList(Model.TEMPLATES).indexOf(p.template)), pi};
+        final Ui.Sheet s = new Ui.Sheet(this, "Papel");
+        s.view(Pickers.paperPicker(this, sel));
+        LinearLayout btns = new LinearLayout(this);
+        btns.setGravity(Gravity.END);
+        btns.setPadding(Ui.dp(this, 20), Ui.dp(this, 16), Ui.dp(this, 20), 0);
+        TextView all = Ui.pill(this, "Todas as páginas", false, v -> {
+            for (Model.Page q : nb.pages) if (q.pdf == null) {
+                q.template = Model.TEMPLATES[sel[0]];
+                q.paperColor = Model.PAPER_COLORS[sel[1]];
+            }
+            s.dismiss();
+            pagesChanged();
+        });
+        btns.addView(all);
+        TextView one = Ui.pill(this, "Esta página", true, v -> {
+            p.template = Model.TEMPLATES[sel[0]];
+            p.paperColor = Model.PAPER_COLORS[sel[1]];
+            s.dismiss();
+            pagesChanged();
+        });
+        LinearLayout.LayoutParams ol = new LinearLayout.LayoutParams(-2, -2);
+        ol.leftMargin = Ui.dp(this, 10);
+        btns.addView(one, ol);
+        s.view(btns).show();
     }
 
     // ================================================================ callbacks do canvas
@@ -520,37 +620,93 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
 
     @Override public void onHistoryChanged() {
         if (undoBtn == null) return;
-        undoBtn.setAlpha(cv.canUndo() ? 1f : 0.35f);
-        redoBtn.setAlpha(cv.canRedo() ? 1f : 0.35f);
+        undoBtn.setAlpha(cv.canUndo() ? 1f : 0.3f);
+        redoBtn.setAlpha(cv.canRedo() ? 1f : 0.3f);
     }
 
     @Override public void onSelectionChanged(boolean has) {
-        selectionBar.setVisibility(has ? View.VISIBLE : View.GONE);
+        if (has) {
+            boolean ink = false;
+            for (Model.Item it : cv.getSelection())
+                if (it instanceof Model.StrokeItem && ((Model.StrokeItem) it).kind == Model.StrokeItem.PEN) ink = true;
+            convertBtn.setVisibility(ink ? View.VISIBLE : View.GONE);
+            if (selectionBar.getVisibility() != View.VISIBLE) {
+                selectionBar.setVisibility(View.VISIBLE);
+                selectionBar.setAlpha(0f);
+                selectionBar.setTranslationY(Ui.dp(this, 12));
+                selectionBar.animate().alpha(1f).translationY(0).setDuration(160).start();
+            }
+        } else selectionBar.setVisibility(View.GONE);
     }
 
-    @Override public void onTextRequest(final float x, final float y, final Model.TextItem existing) {
+    @Override public void onTextRequest(final Model.Page page, final float x, final float y, final Model.TextItem existing) {
         final EditText et = new EditText(this);
         et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         et.setMinLines(3);
         et.setGravity(Gravity.TOP);
         if (existing != null) et.setText(existing.text);
         FrameLayout f = new FrameLayout(this);
-        int p = Ui.dp(this, 20);
+        int p = Ui.dp(this, 22);
         f.setPadding(p, Ui.dp(this, 8), p, 0);
         f.addView(et);
         AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle(existing == null ? "Novo texto" : "Editar texto").setView(f)
                 .setPositiveButton("OK", (d, w) -> {
                     String s = et.getText().toString();
-                    if (s.trim().isEmpty()) { if (existing != null) cv.replaceItem(existing, null); return; }
-                    if (existing == null) cv.addItem(new Model.TextItem(s, x, y - cv.textSize * 0.7f, cv.textSize, cv.textColor));
-                    else cv.replaceItem(existing, new Model.TextItem(s, existing.x, existing.y, existing.size, existing.color));
+                    if (s.trim().isEmpty()) { if (existing != null) cv.replaceItem(page, existing, null); return; }
+                    if (existing == null) cv.addItem(page, new Model.TextItem(s, x, y - cv.textSize * 0.7f, cv.textSize, cv.textColor));
+                    else cv.replaceItem(page, existing, new Model.TextItem(s, existing.x, existing.y, existing.size, existing.color));
                 })
                 .setNegativeButton("Cancelar", null);
-        if (existing != null) b.setNeutralButton("Excluir", (d, w) -> cv.replaceItem(existing, null));
+        if (existing != null) b.setNeutralButton("Excluir", (d, w) -> cv.replaceItem(page, existing, null));
         AlertDialog d = b.create();
         d.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
         d.show();
         et.requestFocus();
+    }
+
+    // ================================================================ escrita → texto
+    private void convertToText() {
+        final List<Model.StrokeItem> ink = new ArrayList<>();
+        final List<Model.Item> keep = new ArrayList<>();
+        for (Model.Item it : cv.getSelection()) {
+            if (it instanceof Model.StrokeItem && ((Model.StrokeItem) it).kind == Model.StrokeItem.PEN) ink.add((Model.StrokeItem) it);
+            else keep.add(it);
+        }
+        if (ink.isEmpty()) { Ui.toast(this, "Selecione escrita feita com a caneta."); return; }
+        Ui.toast(this, "Reconhecendo a escrita…");
+        Recognizer.recognize(ink, new Recognizer.Callback() {
+            @Override public void onResult(String text) {
+                RectF b = new RectF(ink.get(0).bounds());
+                for (Model.StrokeItem s : ink) b.union(s.bounds());
+                final RectF bounds = b;
+                final int color = ink.get(0).color;
+                final EditText et = new EditText(NotebookActivity.this);
+                et.setText(text);
+                et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+                FrameLayout f = new FrameLayout(NotebookActivity.this);
+                int p = Ui.dp(NotebookActivity.this, 22);
+                f.setPadding(p, Ui.dp(NotebookActivity.this, 8), p, 0);
+                f.addView(et);
+                new AlertDialog.Builder(NotebookActivity.this).setTitle("Texto reconhecido").setView(f)
+                        .setPositiveButton("Substituir escrita", (d, w) -> {
+                            String s = et.getText().toString().trim();
+                            if (s.isEmpty()) return;
+                            int lines = s.split("\n").length;
+                            float size = Math.max(18, Math.min(110, bounds.height() / lines * 0.75f));
+                            List<Model.Item> rep = new ArrayList<>(keep);
+                            rep.add(new Model.TextItem(s, bounds.left, bounds.top, size, color));
+                            cv.replaceSelection(rep);
+                        })
+                        .setNeutralButton("Copiar", (d, w) -> {
+                            android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText("texto", et.getText().toString()));
+                            Ui.toast(NotebookActivity.this, "Texto copiado.");
+                        })
+                        .setNegativeButton("Cancelar", null).show();
+            }
+
+            @Override public void onError(String message) { Ui.toast(NotebookActivity.this, message); }
+        });
     }
 
     // ================================================================ imagens, PDFs, exportação
@@ -572,7 +728,7 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
     }
 
     static String safeName(String s) {
-        String r = s.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
+        String r = s.replaceAll("[\\\\/:*?\"<>|\\[\\]]", "_").trim();
         return r.isEmpty() ? "caderno" : r;
     }
 
@@ -588,8 +744,8 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
             case REQ_EXPORT_PNG: {
                 Ui.toast(this, "Exportando…");
                 final boolean isPdf = req == REQ_EXPORT_PDF;
-                final Model.Page page = nb.pages.get(pageIndex);
-                bg.execute(() -> {
+                final Model.Page page = nb.pages.get(current);
+                pdfExec.execute(() -> {
                     String msg;
                     try {
                         OutputStream os = cr.openOutputStream(uri);
@@ -609,9 +765,9 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
 
     private void sharePdf() {
         Ui.toast(this, "Preparando PDF…");
-        bg.execute(() -> {
+        pdfExec.execute(() -> {
             try {
-                File out = new File(ShareProvider.shareDir(this), safeName(nb.title) + ".pdf");
+                final File out = new File(ShareProvider.shareDir(this), safeName(nb.title) + ".pdf");
                 OutputStream os = new FileOutputStream(out);
                 try { Exporter.exportPdf(nb, new PageRenderer(dir, images), pdf, os); } finally { os.close(); }
                 main.post(() -> {
@@ -630,7 +786,7 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
     private void insertImage(final Uri uri) {
         bg.execute(() -> {
             try {
-                String name = "images/img_" + System.currentTimeMillis() + ".img";
+                final String name = "images/img_" + System.currentTimeMillis() + ".img";
                 File f = new File(dir, name);
                 InputStream in = getContentResolver().openInputStream(uri);
                 Storage.copyToFile(in, f);
@@ -641,12 +797,13 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
                 final float ratio = o.outHeight / (float) o.outWidth;
                 main.post(() -> {
                     float[] c = cv.visibleCenter();
+                    Model.Page page = nb.pages.get((int) c[0]);
                     float w = 500, h = w * ratio;
                     if (h > 700) { h = 700; w = h / ratio; }
-                    Model.ImageItem it = new Model.ImageItem(name, new RectF(c[0] - w / 2, c[1] - h / 2, c[0] + w / 2, c[1] + h / 2));
-                    cv.addItem(it);
+                    Model.ImageItem it = new Model.ImageItem(name, new RectF(c[1] - w / 2, c[2] - h / 2, c[1] + w / 2, c[2] + h / 2));
+                    cv.addItem(page, it);
                     selectTool(CanvasView.TOOL_LASSO);
-                    cv.selectOnly(it);
+                    cv.selectOnly(page, it);
                 });
             } catch (Throwable e) {
                 main.post(() -> Ui.toast(this, "Não foi possível inserir a imagem: " + e.getMessage()));
@@ -658,7 +815,7 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
         Ui.toast(this, "Importando PDF…");
         bg.execute(() -> {
             try {
-                String name = "doc_" + System.currentTimeMillis() + ".pdf";
+                final String name = "doc_" + System.currentTimeMillis() + ".pdf";
                 File f = new File(dir, name);
                 Storage.copyToFile(getContentResolver().openInputStream(uri), f);
                 final float[] ratios = PdfHelper.pageRatios(f);
@@ -671,8 +828,8 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
                         p.height = Model.PAGE_W * ratios[i];
                         nb.pages.add(p);
                     }
-                    markDirty();
-                    showPage(at);
+                    pagesChanged();
+                    cv.scrollToPage(at);
                     Ui.toast(this, ratios.length + " páginas adicionadas.");
                 });
             } catch (Throwable e) {
@@ -695,7 +852,7 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
             return;
         }
         try {
-            String stamp = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(new Date());
+            String stamp = new SimpleDateFormat("dd-MM-yyyy HH'h'mm", Locale.US).format(new Date());
             recordingFile = new File(audioDir(), "Gravação " + stamp + ".m4a");
             MediaRecorder r = Build.VERSION.SDK_INT >= 31 ? new MediaRecorder(this) : new MediaRecorder();
             r.setAudioSource(MediaRecorder.AudioSource.MIC);
@@ -707,9 +864,10 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
             r.prepare();
             r.start();
             recorder = r;
-            recBtn.setVisibility(View.VISIBLE);
+            recordStart = SystemClock.elapsedRealtime();
+            recChip.setVisibility(View.VISIBLE);
+            main.post(recTick);
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            Ui.toast(this, "Gravando… toque no ● vermelho para parar.");
         } catch (Exception e) {
             recorder = null;
             Ui.toast(this, "Não foi possível gravar: " + e.getMessage());
@@ -721,7 +879,8 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
         try { recorder.stop(); } catch (Exception e) { if (recordingFile != null) recordingFile.delete(); }
         recorder.release();
         recorder = null;
-        recBtn.setVisibility(View.GONE);
+        recChip.setVisibility(View.GONE);
+        main.removeCallbacks(recTick);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         Ui.toast(this, "Gravação salva neste caderno.");
     }
@@ -732,28 +891,56 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
         else if (req == REQ_AUDIO_PERM) Ui.toast(this, "Permissão de microfone negada.");
     }
 
-    private void recordingsDialog() {
+    private void recordingsSheet() {
         final File[] files = audioDir().listFiles();
         if (files == null || files.length == 0) {
             Ui.toast(this, "Nenhuma gravação ainda. Use ⋮ → Gravar áudio.");
             return;
         }
         Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
-        String[] names = new String[files.length];
-        for (int i = 0; i < files.length; i++) names[i] = "▶  " + files[i].getName().replace(".m4a", "");
-        ListView lv = new ListView(this);
-        lv.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, names));
-        final AlertDialog d = new AlertDialog.Builder(this).setTitle("Gravações (toque longo para excluir)").setView(lv)
-                .setNegativeButton("Fechar", null).create();
-        d.setOnDismissListener(x -> stopPlayback());
-        lv.setOnItemClickListener((a, v, pos, id) -> play(files[pos]));
-        lv.setOnItemLongClickListener((a, v, pos, id) -> {
-            new AlertDialog.Builder(this).setTitle("Excluir gravação?").setMessage(files[pos].getName())
-                    .setPositiveButton("Excluir", (x, w) -> { stopPlayback(); files[pos].delete(); d.dismiss(); })
-                    .setNegativeButton("Cancelar", null).show();
-            return true;
-        });
-        d.show();
+        final Ui.Sheet s = new Ui.Sheet(this, "Gravações");
+        for (final File f : files) {
+            final MediaPlayer probe = new MediaPlayer();
+            String dur = "";
+            try {
+                probe.setDataSource(f.getAbsolutePath());
+                probe.prepare();
+                int sec = probe.getDuration() / 1000;
+                dur = String.format(Locale.US, "%d:%02d", sec / 60, sec % 60);
+            } catch (Exception ignored) {
+            } finally { probe.release(); }
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(Ui.dp(this, 16), Ui.dp(this, 4), Ui.dp(this, 12), Ui.dp(this, 4));
+            final ImageView play = Ui.iconButton(this, "play", Th.primary, null);
+            play.setOnClickListener(v -> {
+                if (player != null && f.getAbsolutePath().equals(v.getTag())) {
+                    stopPlayback();
+                    v.setTag(null);
+                    play.setImageDrawable(Icons.of("play", Th.primary));
+                } else {
+                    play(f);
+                    v.setTag(f.getAbsolutePath());
+                    play.setImageDrawable(Icons.of("stop", Th.primary));
+                }
+            });
+            row.addView(play);
+            LinearLayout texts = new LinearLayout(this);
+            texts.setOrientation(LinearLayout.VERTICAL);
+            texts.setPadding(Ui.dp(this, 10), 0, 0, 0);
+            texts.addView(Ui.text(this, f.getName().replace(".m4a", ""), 14, Th.on, false));
+            texts.addView(Ui.text(this, dur, 12, Th.on2, false));
+            row.addView(texts, Ui.weight());
+            row.addView(Ui.iconButton(this, "trash", Th.danger, v -> Ui.confirm(this, "Excluir gravação?", f.getName(), "Excluir", () -> {
+                stopPlayback();
+                f.delete();
+                s.dismiss();
+                recordingsSheet();
+            })));
+            s.view(row);
+        }
+        s.dialog.setOnDismissListener(x -> stopPlayback());
+        s.show();
     }
 
     private void play(File f) {
@@ -763,7 +950,6 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
             player.setDataSource(f.getAbsolutePath());
             player.prepare();
             player.start();
-            Ui.toast(this, "Reproduzindo… toque em outra gravação ou feche para parar.");
         } catch (Exception e) {
             Ui.toast(this, "Não foi possível reproduzir.");
         }
@@ -780,8 +966,9 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
     // ================================================================ salvamento
     private void markDirty() {
         dirty = true;
+        changedThisSession = true;
         main.removeCallbacks(autosave);
-        main.postDelayed(autosave, 4000);
+        main.postDelayed(autosave, 3000);
     }
 
     private void saveAsync() {
@@ -819,14 +1006,25 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
         boolean wasDirty = dirty;
         saveAsync();
         if (wasDirty || !new File(dir, "thumb.png").exists()) saveThumbnail();
+        if (changedThisSession && AutoBackup.folder(this) != null) {
+            changedThisSession = false;
+            final String id = nb.id, title = nb.title;
+            final android.content.Context app = getApplicationContext();
+            bg.execute(() -> {
+                String err = AutoBackup.run(app, id, title);
+                if (err != null) main.post(() -> Ui.toast(app, "Backup automático falhou: " + err));
+            });
+        }
         stopPlayback();
+        if (toolPopup != null) toolPopup.dismiss();
     }
 
     @Override protected void onDestroy() {
         super.onDestroy();
         stopRecording();
-        bg.execute(() -> { if (pdf != null) pdf.close(); });
+        main.removeCallbacksAndMessages(null);
+        pdfExec.execute(() -> { if (pdf != null) pdf.close(); });
+        pdfExec.shutdown();
         bg.shutdown();
     }
-
 }

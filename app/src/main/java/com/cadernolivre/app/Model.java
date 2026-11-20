@@ -40,6 +40,8 @@ public final class Model {
         public int coverColor = COVER_COLORS[0];
         public long created, updated;
         public int lastPage;
+        /** Id da pasta onde o caderno está ("" = raiz da biblioteca). */
+        public String folder = "";
         public final List<Page> pages = new ArrayList<>();
 
         public JSONObject toJson() throws JSONException {
@@ -50,6 +52,7 @@ public final class Model {
             o.put("created", created);
             o.put("updated", updated);
             o.put("lastPage", lastPage);
+            o.put("folder", folder);
             JSONArray arr = new JSONArray();
             for (Page p : pages) arr.put(p.toJson());
             o.put("pages", arr);
@@ -64,6 +67,7 @@ public final class Model {
             nb.created = o.optLong("created");
             nb.updated = o.optLong("updated");
             nb.lastPage = o.optInt("lastPage", 0);
+            nb.folder = o.optString("folder", "");
             JSONArray arr = o.optJSONArray("pages");
             if (arr != null) for (int i = 0; i < arr.length(); i++) nb.pages.add(Page.fromJson(arr.getJSONObject(i)));
             if (nb.pages.isEmpty()) nb.pages.add(new Page());
@@ -284,6 +288,43 @@ public final class Model {
             float t = l2 == 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / l2;
             t = Math.max(0, Math.min(1, t));
             return (float) Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+        }
+
+        /**
+         * Borracha parcial: remove apenas o trecho dentro do círculo (x, y, r).
+         * Devolve null se o traço não foi tocado, ou a lista de pedaços restantes (pode ser vazia).
+         */
+        public List<StrokeItem> eraseSplit(float ex, float ey, float r) {
+            if (!hit(ex, ey, r)) return null;
+            float rr = r + width * 0.35f;
+            float step = Math.max(1.5f, r / 3f);
+            List<StrokeItem> out = new ArrayList<>();
+            float[] run = new float[64];
+            int len = 0;
+            int n = count();
+            for (int i = 0; i < n; i++) {
+                float x1 = pts[i * 3], y1 = pts[i * 3 + 1], p1 = pts[i * 3 + 2];
+                int sub = 1;
+                float x0 = x1, y0 = y1, p0 = p1;
+                if (i > 0) {
+                    x0 = pts[(i - 1) * 3]; y0 = pts[(i - 1) * 3 + 1]; p0 = pts[(i - 1) * 3 + 2];
+                    sub = Math.max(1, (int) Math.ceil(Math.hypot(x1 - x0, y1 - y0) / step));
+                }
+                for (int k = (i == 0 ? sub : 1); k <= sub; k++) {
+                    float t = k / (float) sub;
+                    float x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t, pr = p0 + (p1 - p0) * t;
+                    boolean erased = Math.hypot(x - ex, y - ey) <= rr;
+                    if (erased) {
+                        if (len >= 6) out.add(new StrokeItem(kind, color, width, java.util.Arrays.copyOf(run, len)));
+                        len = 0;
+                    } else {
+                        if (len + 3 > run.length) run = java.util.Arrays.copyOf(run, run.length * 2);
+                        run[len++] = x; run[len++] = y; run[len++] = pr;
+                    }
+                }
+            }
+            if (len >= 6) out.add(new StrokeItem(kind, color, width, java.util.Arrays.copyOf(run, len)));
+            return out;
         }
 
         @Override public Item translated(float dx, float dy) {

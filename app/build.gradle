@@ -44,3 +44,8 @@ android {
         checkReleaseBuilds false
     }
 }
+
+dependencies {
+    // Reconhecimento de escrita à mão (roda no aparelho; o modelo do idioma é baixado uma vez)
+    implementation 'com.google.mlkit:digital-ink-recognition:18.1.0'
+}

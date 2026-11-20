@@ -27,7 +27,7 @@ public final class Storage {
     private Storage() {}
 
     public static class Meta {
-        public String id, title;
+        public String id, title, folder = "";
         public int cover, pages;
         public long updated;
     }
@@ -58,6 +58,7 @@ public final class Storage {
                 m.cover = o.optInt("cover");
                 m.pages = o.optInt("pages");
                 m.updated = o.optLong("updated");
+                m.folder = o.optString("folder", "");
                 out.add(m);
             } catch (Exception ignored) {
             }
@@ -79,6 +80,7 @@ public final class Storage {
         meta.put("cover", nb.coverColor);
         meta.put("pages", nb.pages.size());
         meta.put("updated", nb.updated);
+        meta.put("folder", nb.folder);
         return new String[]{nb.toJson().toString(), meta.toString()};
     }
 
@@ -94,6 +96,22 @@ public final class Storage {
     }
 
     public static void delete(Context c, String id) { deleteRec(dir(c, id)); }
+
+    /** Altera dados do caderno sem mudar a data de modificação. */
+    public interface Edit { void apply(Model.Notebook nb); }
+
+    public static void edit(Context c, String id, Edit e) throws Exception {
+        Model.Notebook nb = load(c, id);
+        long upd = nb.updated;
+        e.apply(nb);
+        String[] data = serialize(nb);
+        nb.updated = upd;
+        JSONObject meta = new JSONObject(data[1]);
+        meta.put("updated", upd);
+        JSONObject full = new JSONObject(data[0]);
+        full.put("updated", upd);
+        write(c, id, new String[]{full.toString(), meta.toString()});
+    }
 
     public static String duplicate(Context c, String id) throws Exception {
         String nid = newId();
