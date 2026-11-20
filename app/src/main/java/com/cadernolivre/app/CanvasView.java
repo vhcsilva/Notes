@@ -34,6 +34,8 @@ public class CanvasView extends View {
         void onSelectionChanged(boolean hasSelection);
         void onHistoryChanged();
         void onVisiblePageChanged(int index);
+        /** O botão da caneta foi pressionado/solto (borracha temporária). */
+        void onTemporaryEraser(boolean active);
     }
 
     /** Fornece bitmaps de páginas de PDF de forma assíncrona (chame setPdfBitmap quando pronto). */
@@ -96,6 +98,11 @@ public class CanvasView extends View {
     private Model.Page selPage;
     private RectF selBounds;
     private float dragDx, dragDy, shX0, shY0;
+
+    // Botão da S Pen: enquanto pressionado, a caneta vira borracha.
+    private static final int SPEN_DOWN = 211, SPEN_UP = 212, SPEN_MOVE = 213;
+    private boolean tempEraser, hoverEraser;
+    private float hoverDocX = -1, hoverDocY = -1;
 
     private final Paint overlay = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint shadow = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -323,6 +330,14 @@ public class CanvasView extends View {
             drawOverlays(c, p, s);
             c.restore();
         }
+        if (hoverEraser && hoverDocX >= 0) {
+            overlay.setPathEffect(null);
+            overlay.setStrokeWidth(2f / s);
+            fillPaint.setColor(0x22000000);
+            c.drawCircle(hoverDocX, hoverDocY, eraserSize, fillPaint);
+            overlay.setColor(0xFF757575);
+            c.drawCircle(hoverDocX, hoverDocY, eraserSize, overlay);
+        }
         c.restore();
         if (center != visibleIndex && center >= 0) {
             visibleIndex = center;
@@ -363,9 +378,72 @@ public class CanvasView extends View {
     }
 
     // ================================================================ toque
-    @Override public boolean onTouchEvent(MotionEvent e) {
+    /** Botão lateral da caneta pressionado? (padrão Android e variantes de fabricantes) */
+    private static boolean penButton(MotionEvent e) {
+        int tt = e.getToolType(0);
+        if (tt != MotionEvent.TOOL_TYPE_STYLUS && tt != MotionEvent.TOOL_TYPE_ERASER) return false;
+        int b = e.getButtonState();
+        return (b & (MotionEvent.BUTTON_STYLUS_PRIMARY | MotionEvent.BUTTON_STYLUS_SECONDARY
+                | MotionEvent.BUTTON_SECONDARY | MotionEvent.BUTTON_TERTIARY)) != 0;
+    }
+
+    private void setTempEraser(boolean on) {
+        if (tempEraser == on) return;
+        tempEraser = on;
+        if (listener != null) listener.onTemporaryEraser(on || hoverEraser);
+    }
+
+    private void setHoverEraser(boolean on) {
+        if (hoverEraser == on) return;
+        hoverEraser = on;
+        if (listener != null) listener.onTemporaryEraser(on || tempEraser);
+        invalidate();
+    }
+
+    @Override public boolean onHoverEvent(MotionEvent e) {
+        if (nb == null) return super.onHoverEvent(e);
+        int a = e.getActionMasked();
+        if (a == MotionEvent.ACTION_HOVER_EXIT) {
+            setHoverEraser(false);
+            hoverDocX = -1;
+            invalidate();
+            return true;
+        }
+        if (e.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS || e.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER) {
+            boolean er = penButton(e) || e.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER;
+            setHoverEraser(er);
+            if (er) {
+                float[] d = toDoc(e.getX(), e.getY());
+                hoverDocX = d[0];
+                hoverDocY = d[1];
+                invalidate();
+            }
+            return true;
+        }
+        return super.onHoverEvent(e);
+    }
+
+    @Override public boolean onTouchEvent(MotionEvent ev) {
         if (nb == null) return false;
+        // Aparelhos Samsung antigos enviam códigos próprios quando o botão da S Pen está pressionado.
+        MotionEvent e = ev;
+        boolean samsungButton = false;
+        int raw = ev.getActionMasked();
+        if (raw == SPEN_DOWN || raw == SPEN_UP || raw == SPEN_MOVE) {
+            e = MotionEvent.obtain(ev);
+            e.setAction(raw == SPEN_DOWN ? MotionEvent.ACTION_DOWN : raw == SPEN_UP ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE);
+            samsungButton = true;
+        }
+        try {
+            return handleTouch(e, samsungButton || penButton(e) || e.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER);
+        } finally {
+            if (e != ev) e.recycle();
+        }
+    }
+
+    private boolean handleTouch(MotionEvent e, boolean button) {
         scaleDetector.onTouchEvent(e);
+        hoverDocX = -1;
         int action = e.getActionMasked();
         switch (action) {
             case MotionEvent.ACTION_DOWN: {
@@ -387,8 +465,7 @@ public class CanvasView extends View {
                 gPage = nb.pages.get(pi);
                 gTop = tops[pi];
                 int t = tool;
-                if (tt == MotionEvent.TOOL_TYPE_ERASER || (tt == MotionEvent.TOOL_TYPE_STYLUS
-                        && (e.getButtonState() & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0)) t = TOOL_ERASER;
+                if (button) { t = TOOL_ERASER; setTempEraser(true); }
                 startTool(t, new float[]{d[0], d[1] - gTop}, e);
                 return true;
             }
@@ -414,7 +491,10 @@ public class CanvasView extends View {
                     lastY = e.getY();
                     clampMatrix();
                     invalidate();
-                } else moveTool(e);
+                } else {
+                    switchToolIfButtonChanged(e, button);
+                    moveTool(e);
+                }
                 return true;
             case MotionEvent.ACTION_POINTER_UP:
                 if (mode == M_MULTI) {
@@ -433,15 +513,53 @@ public class CanvasView extends View {
                     postInvalidateOnAnimation();
                 } else if (mode != M_MULTI && mode != M_PAN) endTool(e);
                 mode = M_NONE;
+                setTempEraser(false);
                 invalidate();
                 return true;
             case MotionEvent.ACTION_CANCEL:
                 cancelCurrent();
                 mode = M_NONE;
+                setTempEraser(false);
                 invalidate();
                 return true;
         }
         return true;
+    }
+
+    /** Apertou ou soltou o botão no meio do traço: encerra o que estava fazendo e troca de ferramenta. */
+    private void switchToolIfButtonChanged(MotionEvent e, boolean button) {
+        if (gPage == null) return;
+        if (button && mode != M_ERASE && mode != M_NONE) {
+            // Conclui o traço/forma em andamento e começa a apagar.
+            if (mode == M_DRAW && bufLen >= 6) {
+                float[] pts = new float[bufLen];
+                System.arraycopy(buf, 0, pts, 0, bufLen);
+                boolean pen = curKind == Model.StrokeItem.PEN;
+                addItem(gPage, new Model.StrokeItem(curKind, pen ? penColor : hlColor, pen ? penWidth : hlWidth, pts));
+            } else if (mode == M_SHAPE && preview != null) {
+                RectF b = preview.bounds();
+                if (b.width() > 6 || b.height() > 6) addItem(gPage, preview);
+            }
+            preview = null;
+            bufLen = 0;
+            lasso.clear();
+            dragDx = dragDy = 0;
+            setTempEraser(true);
+            startTool(TOOL_ERASER, local(e.getX(), e.getY()), e);
+        } else if (!button && tempEraser && mode == M_ERASE) {
+            // Soltou o botão: finaliza a borracha e volta à ferramenta escolhida.
+            if (erased) {
+                pushUndo(gPage, eraseSnapshot);
+                changed();
+            }
+            erased = false;
+            eraseSnapshot = null;
+            eraserX = -1;
+            setTempEraser(false);
+            int t = tool == TOOL_TEXT ? TOOL_ERASER : tool;
+            if (t == TOOL_ERASER) { mode = M_NONE; return; }
+            startTool(t, local(e.getX(), e.getY()), e);
+        }
     }
 
     private static float[] focus(MotionEvent e, int skip) {

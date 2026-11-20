@@ -264,6 +264,8 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
         s.item("export", "Exportar como PDF", () -> createDoc("application/pdf", safeName(nb.title) + ".pdf", REQ_EXPORT_PDF));
         s.item("share", "Compartilhar como PDF", this::sharePdf);
         s.item("image", "Salvar página como imagem", () -> createDoc("image/png", safeName(nb.title) + "-p" + (current + 1) + ".png", REQ_EXPORT_PNG));
+        s.item("eraser", "Botão da caneta = borracha", "Segure o botão da S Pen para apagar; solte para voltar", false,
+                () -> Ui.toast(this, "Sempre ativo: segure o botão lateral da caneta enquanto escreve para apagar."));
         s.item("hand", "Modo só caneta", cv.stylusOnly ? "Ativado: o dedo só rola a página" : "Desativado: dedo e caneta escrevem", false, () -> {
             cv.stylusOnly = !cv.stylusOnly;
             prefs.edit().putBoolean("stylusOnly", cv.stylusOnly).apply();
@@ -296,6 +298,18 @@ public class NotebookActivity extends Activity implements CanvasView.Listener {
                 .putFloat("eraserSize", cv.eraserSize).putBoolean("partialEraser", cv.partialEraser)
                 .putInt("textColor", cv.textColor).putFloat("textSize", cv.textSize)
                 .putInt("shapeType", cv.shapeType).putInt("tool", cv.tool).apply();
+    }
+
+    @Override public void onTemporaryEraser(boolean active) {
+        highlightTool(active ? CanvasView.TOOL_ERASER : cv.tool);
+    }
+
+    private void highlightTool(int t) {
+        for (int i = 0; i < toolBtns.length; i++) {
+            boolean sel = i == t;
+            toolBtns[i].setImageDrawable(Icons.of(TOOL_ICONS[i], sel ? Th.primary : Th.on));
+            toolBtns[i].setBackground(sel ? Ui.ripple(Th.primarySoft, Ui.dp(this, 23)) : Ui.ripple(0, Ui.dp(this, 23)));
+        }
     }
 
     private void selectTool(int t) {
